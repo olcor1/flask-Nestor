@@ -21,13 +21,18 @@ def extract():
     file = request.files["file"]
     extracted_data = []
 
-    with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                extracted_data.append(text)
+   with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+    extracted_data = []
+    for i, page in enumerate(pdf.pages):
+        text = page.extract_text()
+        if text:
+            extracted_data.append(f"--- Page {i+1} ---\n{text}")
 
-    return jsonify({"pages": extracted_data})
+# Concaténer pour affichage plus lisible
+all_text = "\n\n".join(extracted_data)
+
+return jsonify({"extracted_text": all_text})
+
 
 @app.route("/")
 def home():
