@@ -42,3 +42,11 @@ def extract():
 @app.route("/")
 def home():
     return "Bravo Oli!"
+
+@app.route("/tesseract-test")
+def tesseract_test():
+    try:
+        version = pytesseract.get_tesseract_version()
+        return jsonify({"tesseract_version": str(version)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
