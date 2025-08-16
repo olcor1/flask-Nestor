@@ -2,6 +2,7 @@ import os
 from flask import Flask, request, jsonify
 import pdfplumber
 import io
+import pytesseract
 
 app = Flask("Plumber pour EFs")
 
