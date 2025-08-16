@@ -17,21 +17,26 @@ def check_api_key():
 def extract():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-    
+
     file = request.files["file"]
     extracted_data = []
 
-   with pdfplumber.open(io.BytesIO(file.read())) as pdf:
-    extracted_data = []
-    for i, page in enumerate(pdf.pages):
-        text = page.extract_text()
-        if text:
-            extracted_data.append(f"--- Page {i+1} ---\n{text}")
+    try:
+        with pdfplumber.open(io.BytesIO(file.read())) as pdf:
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if text:  # s'assure que ce n'est pas None
+                    # Ajouter séparateur pour lisibilité
+                    extracted_data.append(f"--- Page {i+1} ---\n{text}")
 
-# Concaténer pour affichage plus lisible
-all_text = "\n\n".join(extracted_data)
+        # Concaténer uniquement si la liste n'est pas vide
+        all_text = "\n\n".join(extracted_data) if extracted_data else "No text found in PDF"
 
-return jsonify({"extracted_text": all_text})
+        return jsonify({"extracted_text": all_text})
+
+    except Exception as e:
+        # Capture les erreurs de pdfplumber ou du PDF
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/")
