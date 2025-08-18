@@ -3,6 +3,7 @@ import pytesseract
 from PIL import Image
 import uuid
 from datetime import datetime
+import spacy
 from .anonymizer import anonymize_text
 from .financial_utils import (
     detecter_section,
@@ -11,6 +12,9 @@ from .financial_utils import (
     detecter_type_etats_financiers,
     detecter_annee_etats
 )
+
+# Charge le modèle spaCy pour l'ensemble du fichier
+nlp = spacy.load("fr_core_news_md")
 
 def ocr_image(image):
     return pytesseract.image_to_string(image, lang='fra+eng')
@@ -27,8 +31,11 @@ def process_pdf(file):
         total_pages = len(pdf.pages)
 
         # 1. Première page : métadonnées
-        first_page_text = pdf.pages[0].extract_text() or ocr_image(pdf.pages[0].to_image().original)
-        doc = nlp(first_page_text)
+        first_page_text = pdf.pages[0].extract_text()
+        if not first_page_text:
+            first_page_text = ocr_image(pdf.pages[0].to_image().original)
+
+        doc = nlp(first_page_text)  # ← Utilisation de nlp pour extraire le nom de l'entreprise
         company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
 
         # Détecte type, consolidation et année
@@ -56,7 +63,7 @@ def process_pdf(file):
                 elif any(kw in header for kw in ["bénéfices non répartis"]):
                     etat = "benefices_non_repartis"
 
-                for row in table[1:]:
+                for row in table[1:]:  # Ignore l'en-tête
                     if len(row) >= 2:
                         poste = row[0].strip()
                         poste_anonymise = anonymize_text(poste, company_name)
@@ -85,6 +92,7 @@ def process_pdf(file):
         # 5. Anonymise le texte complet
         anonymized_text = anonymize_text(full_text, company_name)
 
+        # 6. Retourne le JSON final
         return {
             "metadata": {
                 "entreprise_id": entreprise_id,
