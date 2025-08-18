@@ -13,7 +13,7 @@ from .financial_utils import (
     detecter_type_etats_financiers
 )
 
-# Charge le modèle spaCy une seule fois
+# Charge le modèle spaCy
 nlp = spacy.load("fr_core_news_md")
 
 def ocr_image(image):
@@ -27,6 +27,39 @@ def generer_id_unique(prefix: str = "ENT") -> str:
     """Génère un ID unique pour l'entreprise."""
     return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
 
+def extract_lines_from_page(page):
+    """Extrait les lignes de texte d'une page, avec fallback si page.chars échoue."""
+    try:
+        # Méthode 1: Utilise les coordonnées des caractères (si disponibles)
+        words = page.chars
+        if words and 'y' in words[0]:  # Vérifie que les coordonnées existent
+            current_words = []
+            lines = []
+            for char in words:
+                if current_words and abs(char["y"] - current_words[-1]["y"]) > 5:
+                    if current_words:
+                        lines.append("".join([c["text"] for c in current_words]))
+                        current_words = []
+                if current_words and abs(char["x"] - current_words[-1]["x"]) > 5:
+                    lines.append("".join([c["text"] for c in current_words]))
+                    current_words = []
+                current_words.append(char)
+            if current_words:
+                lines.append("".join([c["text"] for c in current_words]))
+            return lines
+    except:
+        pass  # Si page.chars échoue, passe à la méthode 2
+
+    # Méthode 2: Utilise extract_text() avec fallback OCR
+    text = page.extract_text()
+    if not text:
+        try:
+            img = page.to_image().original
+            text = ocr_image(img)
+        except:
+            text = ""
+    return text.split('\n') if text else []
+
 def process_pdf(file):
     """Traite le PDF et extrait les comptes avec montants pour 2 années."""
     with pdfplumber.open(file) as pdf:
@@ -38,62 +71,39 @@ def process_pdf(file):
         first_page = pdf.pages[0]
         first_page_text = first_page.extract_text() or ocr_image(first_page.to_image().original)
 
-        # Détection des métadonnées
         doc = nlp(first_page_text)
         company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
+
         ef_info = detecter_type_etats_financiers(first_page_text)
         annee_etats = detecter_annee_etats(first_page_text)
         date_complete = detecter_date_complete(first_page_text)
 
         # 2. Traite chaque page
         for page_num, page in enumerate(pdf.pages):
-            page_text = page.extract_text() or ocr_image(page.to_image().original)
+            lines = extract_lines_from_page(page)
+            page_text = "\n".join(lines)
             full_text += page_text + "\n"
-
-            # Utilise les coordonnées des caractères pour détecter les colonnes
-            words = page.chars  # Tous les caractères avec leurs positions (x, y)
-
-            # Regroupe les caractères en mots puis en lignes
-            current_words = []
-            lines = []
-            for char in words:
-                if current_words and abs(char["y"] - current_words[-1]["y"]) > 5:  # Nouveau mot si écart vertical
-                    if current_words:
-                        lines.append(current_words)
-                        current_words = []
-                if current_words and abs(char["x"] - current_words[-1]["x"]) > 5:  # Nouveau mot si écart horizontal
-                    lines.append(current_words)
-                    current_words = []
-                current_words.append(char)
-            if current_words:
-                lines.append(current_words)
-
-            # Convertit les lignes de caractères en lignes de texte
-            text_lines = []
-            for line in lines:
-                text_line = "".join([c["text"] for c in line]).strip()
-                if text_line:  # Ignore les lignes vides
-                    text_lines.append(text_line)
 
             # Détecte les colonnes de montants (indices des colonnes avec des nombres)
             amount_columns = []
-            for line in text_lines:
+            for line in lines:
                 parts = re.split(r'\s{2,}', line)
                 for i, part in enumerate(parts):
-                    if re.match(r'^\d[\d\s.,]*$', part.strip()):  # Partie qui ressemble à un montant
+                    if re.match(r'^\d[\d\s.,]*$', part.strip()):
                         if i not in amount_columns:
                             amount_columns.append(i)
 
             # Associe les libellés aux montants
             current_section = None
-            for line in text_lines:
-                if "PRODUITS" in line.upper():
+            for line in lines:
+                line_upper = line.upper()
+                if "PRODUITS" in line_upper:
                     current_section = "Produits"
-                elif "CHARGES LOCATIVES" in line.upper():
+                elif "CHARGES LOCATIVES" in line_upper:
                     current_section = "Charges locatives"
 
                 parts = re.split(r'\s{2,}', line)
-                if len(parts) > 0 and not parts[0][0].isdigit():  # Ligne avec libellé (ne commence pas par un chiffre)
+                if len(parts) > 0 and not parts[0][0].isdigit():  # Ligne avec libellé
                     poste = parts[0].strip()
                     montants = []
                     for col in sorted(amount_columns):
@@ -103,7 +113,7 @@ def process_pdf(file):
                                 montant = float(montant_str)
                                 montants.append(montant)
                             except:
-                                montants.append(None)
+                                continue
 
                     if montants and poste:
                         poste_anonymise = anonymize_text(poste, company_name)
@@ -118,7 +128,6 @@ def process_pdf(file):
                             "page_source": page_num + 1
                         })
 
-        # 3. Retourne le JSON final
         return {
             "metadata": {
                 "entreprise_id": entreprise_id,
