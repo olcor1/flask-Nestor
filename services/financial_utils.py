@@ -2,37 +2,32 @@ import re
 from typing import Dict, Optional
 from datetime import datetime
 
-def detecter_section(poste: str, etat: str) -> Optional[str]:
-    poste_lower = poste.lower()
-    if etat == "bilan":
-        if any(kw in poste_lower for kw in ["courant", "court terme"]):
-            return "Actif court terme"
-        elif any(kw in poste_lower for kw in ["immobilisé", "long terme"]):
-            return "Actif long terme"
-    return None
+def detecter_section_pdf(text: str) -> str:
+    """Détecte la section actuelle (Produits, Charges, etc.)."""
+    text_upper = text.upper()
+    if "PRODUITS" in text_upper:
+        return "Produits"
+    elif "CHARGES LOCATIVES" in text_upper:
+        return "Charges locatives"
+    elif "BÉNÉFICE" in text_upper:
+        return "Bénéfice"
+    return "Autre"
 
-def extraire_montants_annees(line: str) -> Dict[str, Optional[float]]:
-    parts = re.split(r'\s{2,}', line.strip())
-    montant_courant = None
-    montant_precedent = None
-    if len(parts) >= 3:
-        try:
-            montant_courant = float(parts[-1].replace(' ', '').replace(',', '.'))
-            montant_precedent = float(parts[-2].replace(' ', '').replace(',', '.'))
-        except:
-            pass
-    elif len(parts) >= 2:
-        try:
-            montant_courant = float(parts[-1].replace(' ', '').replace(',', '.'))
-        except:
-            pass
-    return {"courant": montant_courant, "precedent": montant_precedent}
-
-def detecter_reference_annexe(text: str) -> Optional[str]:
-    match = re.search(r'\(?voir annexe ([A-Za-z0-9])\)?', text.lower())
+def detecter_date_complete(text: str) -> Optional[str]:
+    """Extrait la date complète (ex: '30 septembre 2020')."""
+    match = re.search(r'(?:au|le|terminé le)\s*(\d{1,2}\s*\w+\s*\d{4})', text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    match = re.search(r'(\d{1,2}\s*\w+\s*\d{4})', text)  # Format libre
     return match.group(1) if match else None
 
+def detecter_annee_etats(text: str) -> int:
+    """Détecte l'année des états financiers."""
+    match = re.search(r'(\d{4})', text)
+    return int(match.group(1)) if match else datetime.now().year
+
 def detecter_type_etats_financiers(text: str) -> Dict[str, Optional[str]]:
+    """Détecte le type d'états financiers et si consolidé."""
     text_lower = text.lower()
     type_ef = None
     if "audité" in text_lower:
@@ -41,9 +36,6 @@ def detecter_type_etats_financiers(text: str) -> Dict[str, Optional[str]]:
         type_ef = "mission d'examen"
     elif "compilé" in text_lower:
         type_ef = "compilé"
-    est_consolide = "consolidé" in text_lower
-    return {"type": type_ef, "consolide": est_consolide if est_consolide else None}
 
-def detecter_annee_etats(text: str) -> int:
-    match = re.search(r'(?:exercice|année|clos le).*?(\d{4})', text.lower())
-    return int(match.group(1)) if match else datetime.now().year
+    est_consolide = "consolidé" in text_lower and "non consolidé" not in text_lower
+    return {"type": type_ef, "consolide": est_consolide if "consolidé" in text_lower else None}
