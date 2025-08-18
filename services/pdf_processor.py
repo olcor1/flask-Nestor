@@ -26,8 +26,31 @@ def generer_id_unique(prefix: str = "ENT") -> str:
     """Génère un ID unique pour l'entreprise."""
     return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
 
+def extract_tables_with_fallback(pdf_path):
+    """Essaie différentes configurations pour extraire les tableaux."""
+    table_configurations = [
+        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},  # Bordures claires
+        {"vertical_strategy": "text", "horizontal_strategy": "text"},   # Alignement texte
+        {"vertical_strategy": "explicit", "horizontal_strategy": "explicit"},  # Explicite
+        {"vertical_strategy": "lines_strict", "horizontal_strategy": "lines_strict"}  # Strict
+    ]
+
+    best_tables = []
+    for config in table_configurations:
+        with pdfplumber.open(pdf_path) as pdf:
+            tables = []
+            for page in pdf.pages:
+                extracted_tables = page.extract_tables(config)
+                if extracted_tables:
+                    tables.extend(extracted_tables)
+            if tables:
+                best_tables = tables
+                break  # Utilise la première configuration qui fonctionne
+
+    return best_tables
+
 def process_pdf(file):
-    """Traite le PDF et extrait les comptes avec montants pour 2 années."""
+    """Traite le PDF avec fallback automatique pour les tableaux."""
     with pdfplumber.open(file) as pdf:
         full_text = ""
         comptes = []
@@ -44,63 +67,59 @@ def process_pdf(file):
         annee_etats = detecter_annee_etats(first_page_text)
         date_complete = detecter_date_complete(first_page_text)
 
-        # 2. Traite chaque page
-        for page_num, page in enumerate(pdf.pages):
-            page_text = page.extract_text() or ocr_image(page.to_image().original)
-            full_text += page_text + "\n"
+        # 2. Extrait les tableaux avec fallback automatique
+        tables = extract_tables_with_fallback(file)
 
-            # Extrait les lignes de texte
-            lines = page_text.split('\n')
-
-            # Détecte la section actuelle (Produits, Charges, etc.)
-            current_section = None
-
-            for line in lines:
-                line = line.strip()
-                if not line:
+        # 3. Traite chaque tableau
+        current_section = None
+        for table in tables:
+            for row in table:
+                if not row:
                     continue
 
                 # Détecte les sections
-                if line.upper().startswith("PRODUITS"):
+                first_cell = row[0].strip().upper() if row else ""
+                if "PRODUITS" in first_cell:
                     current_section = "Produits"
                     continue
-                elif line.upper().startswith("CHARGES"):
+                elif "CHARGES" in first_cell:
                     current_section = "Charges locatives"
                     continue
+                elif "BÉNÉFICE" in first_cell:
+                    current_section = "Bénéfice"
+                    continue
 
-                # Cherche les lignes avec des montants (ex: "Assurances 963 842")
-                if re.search(r'\d[\d\s.,]+', line):
-                    # Séparation des parties par espaces multiples
-                    parts = re.split(r'\s{2,}', line.strip())
+                # Ignore les lignes vides ou les en-têtes
+                if not row[0] or row[0].strip().upper() in ["TOTAL", "BÉNÉFICE D'EXPLOITATION", "BÉNÉFICE AVANT IMPÔTS"]:
+                    continue
 
-                    if len(parts) >= 2:
-                        # La première partie est le libellé
-                        poste = parts[0].strip()
+                # Extrait les montants
+                poste = row[0].strip()
+                montants = []
+                for value in row[1:]:
+                    if isinstance(value, str):
+                        montant_str = re.sub(r'[^\d.,]', '', value.strip())
+                        if montant_str:
+                            try:
+                                montant = float(montant_str.replace(',', '.'))
+                                montants.append(montant)
+                            except:
+                                continue
 
-                        # Les parties suivantes sont les montants
-                        montants = []
-                        for part in parts[1:]:
-                            montant_str = re.sub(r'[^\d.,]', '', part.strip())
-                            if montant_str:
-                                try:
-                                    montant = float(montant_str.replace(',', '.'))
-                                    montants.append(montant)
-                                except:
-                                    continue
+                if montants and poste:
+                    poste_anonymise = anonymize_text(poste, company_name)
+                    comptes.append({
+                        "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
+                        "nom": poste_anonymise,
+                        "etat": "etat_des_resultats",
+                        "section": current_section or "Autre",
+                        "montant_annee_courante": montants[0] if len(montants) > 0 else None,
+                        "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
+                        "reference_annexe": None,
+                        "page_source": pdf.pages.index(pdf.pages[0]) + 1  # À ajuster si multi-pages
+                    })
 
-                        if montants and poste:
-                            poste_anonymise = anonymize_text(poste, company_name)
-                            comptes.append({
-                                "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
-                                "nom": poste_anonymise,
-                                "etat": "etat_des_resultats",
-                                "section": current_section or "Autre",
-                                "montant_annee_courante": montants[0] if len(montants) > 0 else None,
-                                "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
-                                "reference_annexe": None,
-                                "page_source": page_num + 1
-                            })
-
+        # 4. Retourne le JSON final
         return {
             "metadata": {
                 "entreprise_id": entreprise_id,
