@@ -13,3 +13,6 @@ pytesseract==0.3.10
 Pillow==10.1.0
 opencv-python==4.8.0.76
 python-dotenv==1.0.0
+camelot-py[cv]==0.10.1
+pandas==2.0.3
+openpyxl==3.1.2
