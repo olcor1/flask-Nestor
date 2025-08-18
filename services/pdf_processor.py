@@ -7,7 +7,6 @@ import spacy
 import re
 from .anonymizer import anonymize_text
 from .financial_utils import (
-    detecter_section_pdf,
     detecter_date_complete,
     detecter_annee_etats,
     detecter_type_etats_financiers
@@ -26,39 +25,6 @@ def ocr_image(image):
 def generer_id_unique(prefix: str = "ENT") -> str:
     """Génère un ID unique pour l'entreprise."""
     return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
-
-def extract_lines_from_page(page):
-    """Extrait les lignes de texte d'une page, avec fallback si page.chars échoue."""
-    try:
-        # Méthode 1: Utilise les coordonnées des caractères (si disponibles)
-        words = page.chars
-        if words and 'y' in words[0]:  # Vérifie que les coordonnées existent
-            current_words = []
-            lines = []
-            for char in words:
-                if current_words and abs(char["y"] - current_words[-1]["y"]) > 5:
-                    if current_words:
-                        lines.append("".join([c["text"] for c in current_words]))
-                        current_words = []
-                if current_words and abs(char["x"] - current_words[-1]["x"]) > 5:
-                    lines.append("".join([c["text"] for c in current_words]))
-                    current_words = []
-                current_words.append(char)
-            if current_words:
-                lines.append("".join([c["text"] for c in current_words]))
-            return lines
-    except:
-        pass  # Si page.chars échoue, passe à la méthode 2
-
-    # Méthode 2: Utilise extract_text() avec fallback OCR
-    text = page.extract_text()
-    if not text:
-        try:
-            img = page.to_image().original
-            text = ocr_image(img)
-        except:
-            text = ""
-    return text.split('\n') if text else []
 
 def process_pdf(file):
     """Traite le PDF et extrait les comptes avec montants pour 2 années."""
@@ -80,53 +46,60 @@ def process_pdf(file):
 
         # 2. Traite chaque page
         for page_num, page in enumerate(pdf.pages):
-            lines = extract_lines_from_page(page)
-            page_text = "\n".join(lines)
+            page_text = page.extract_text() or ocr_image(page.to_image().original)
             full_text += page_text + "\n"
 
-            # Détecte les colonnes de montants (indices des colonnes avec des nombres)
-            amount_columns = []
-            for line in lines:
-                parts = re.split(r'\s{2,}', line)
-                for i, part in enumerate(parts):
-                    if re.match(r'^\d[\d\s.,]*$', part.strip()):
-                        if i not in amount_columns:
-                            amount_columns.append(i)
+            # Extrait les lignes de texte
+            lines = page_text.split('\n')
 
-            # Associe les libellés aux montants
+            # Détecte la section actuelle (Produits, Charges, etc.)
             current_section = None
+
             for line in lines:
-                line_upper = line.upper()
-                if "PRODUITS" in line_upper:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Détecte les sections
+                if line.upper().startswith("PRODUITS"):
                     current_section = "Produits"
-                elif "CHARGES LOCATIVES" in line_upper:
+                    continue
+                elif line.upper().startswith("CHARGES"):
                     current_section = "Charges locatives"
+                    continue
 
-                parts = re.split(r'\s{2,}', line)
-                if len(parts) > 0 and not parts[0][0].isdigit():  # Ligne avec libellé
-                    poste = parts[0].strip()
-                    montants = []
-                    for col in sorted(amount_columns):
-                        if col < len(parts):
-                            montant_str = parts[col].replace(' ', '').replace(',', '.')
-                            try:
-                                montant = float(montant_str)
-                                montants.append(montant)
-                            except:
-                                continue
+                # Cherche les lignes avec des montants (ex: "Assurances 963 842")
+                if re.search(r'\d[\d\s.,]+', line):
+                    # Séparation des parties par espaces multiples
+                    parts = re.split(r'\s{2,}', line.strip())
 
-                    if montants and poste:
-                        poste_anonymise = anonymize_text(poste, company_name)
-                        comptes.append({
-                            "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
-                            "nom": poste_anonymise,
-                            "etat": "etat_des_resultats",
-                            "section": current_section or "Autre",
-                            "montant_annee_courante": montants[0] if len(montants) > 0 else None,
-                            "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
-                            "reference_annexe": None,
-                            "page_source": page_num + 1
-                        })
+                    if len(parts) >= 2:
+                        # La première partie est le libellé
+                        poste = parts[0].strip()
+
+                        # Les parties suivantes sont les montants
+                        montants = []
+                        for part in parts[1:]:
+                            montant_str = re.sub(r'[^\d.,]', '', part.strip())
+                            if montant_str:
+                                try:
+                                    montant = float(montant_str.replace(',', '.'))
+                                    montants.append(montant)
+                                except:
+                                    continue
+
+                        if montants and poste:
+                            poste_anonymise = anonymize_text(poste, company_name)
+                            comptes.append({
+                                "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
+                                "nom": poste_anonymise,
+                                "etat": "etat_des_resultats",
+                                "section": current_section or "Autre",
+                                "montant_annee_courante": montants[0] if len(montants) > 0 else None,
+                                "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
+                                "reference_annexe": None,
+                                "page_source": page_num + 1
+                            })
 
         return {
             "metadata": {
