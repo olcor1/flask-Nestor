@@ -37,18 +37,17 @@ def clean_montant(text):
         return None
 
 def find_column_positions(lines):
-    """Trouve les positions des colonnes en utilisant les '$' dans la première ligne."""
-    if not lines:
-        return []
-
-    first_line = lines[0]
-    dollar_positions = [m.start() for m in re.finditer(r'\$', first_line)]
+    """Trouve les positions des colonnes en utilisant les '$' dans les 5 premières lignes."""
+    dollar_positions = set()
+    for line in lines[:5]:  # Analyse les 5 premières lignes
+        for match in re.finditer(r'\$', line):
+            dollar_positions.add(match.start())
 
     if not dollar_positions:
         return []
 
     # Ajoute une position pour le début de la ligne (colonne des libellés)
-    column_positions = [0] + dollar_positions
+    column_positions = [0] + sorted(dollar_positions)
     return column_positions
 
 def extract_data_with_columns(page_text):
@@ -135,7 +134,7 @@ def process_pdf(file):
                 "date_etats_financiers": date_complete,
                 "type_etats_financiers": ef_info["type"],
                 "est_consolide": ef_info["consolide"],
-                "date_extraction": datetime.now().strftime("%Y-%m%d"),
+                "date_extraction": datetime.now().strftime("%Y-%m-%d"),
                 "source": file.filename
             },
             "comptes": [{**compte, "id": f"CPT_{uuid.uuid4().hex[:8].upper()}", "nom": anonymize_text(compte["nom"], company_name)} for compte in comptes],
