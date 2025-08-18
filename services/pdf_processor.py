@@ -26,31 +26,18 @@ def generer_id_unique(prefix: str = "ENT") -> str:
     """Génère un ID unique pour l'entreprise."""
     return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
 
-def extract_tables_with_fallback(pdf_path):
-    """Essaie différentes configurations pour extraire les tableaux."""
-    table_configurations = [
-        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},  # Bordures claires
-        {"vertical_strategy": "text", "horizontal_strategy": "text"},   # Alignement texte
-        {"vertical_strategy": "explicit", "horizontal_strategy": "explicit"},  # Explicite
-        {"vertical_strategy": "lines_strict", "horizontal_strategy": "lines_strict"}  # Strict
-    ]
-
-    best_tables = []
-    for config in table_configurations:
-        with pdfplumber.open(pdf_path) as pdf:
-            tables = []
-            for page in pdf.pages:
-                extracted_tables = page.extract_tables(config)
-                if extracted_tables:
-                    tables.extend(extracted_tables)
-            if tables:
-                best_tables = tables
-                break  # Utilise la première configuration qui fonctionne
-
-    return best_tables
+def clean_montant(text):
+    """Nettoie un montant (ex: '155 780$' → 155780.0)."""
+    if not text:
+        return None
+    text = re.sub(r'[^\d]', '', text.strip())  # Garde seulement les chiffres
+    try:
+        return float(text) if text else None
+    except:
+        return None
 
 def process_pdf(file):
-    """Traite le PDF avec fallback automatique pour les tableaux."""
+    """Traite le PDF en forçant 3 colonnes : libellé, montant 2020, montant 2019."""
     with pdfplumber.open(file) as pdf:
         full_text = ""
         comptes = []
@@ -67,59 +54,69 @@ def process_pdf(file):
         annee_etats = detecter_annee_etats(first_page_text)
         date_complete = detecter_date_complete(first_page_text)
 
-        # 2. Extrait les tableaux avec fallback automatique
-        tables = extract_tables_with_fallback(file)
+        # 2. Extrait le texte complet pour référence
+        for page in pdf.pages:
+            page_text = page.extract_text() or ocr_image(page.to_image().original)
+            full_text += page_text + "\n"
 
-        # 3. Traite chaque tableau
-        current_section = None
-        for table in tables:
-            for row in table:
-                if not row:
-                    continue
+        # 3. Extrait les tableaux avec une configuration optimisée pour 3 colonnes
+        for page in pdf.pages:
+            # Utilise des paramètres stricts pour forcer 3 colonnes
+            tables = page.extract_tables({
+                "vertical_strategy": "text",
+                "horizontal_strategy": "text",
+                "explicit_vertical_lines": [],
+                "explicit_horizontal_lines": [],
+                "snap_tolerance": 3,
+                "join_tolerance": 3
+            })
 
-                # Détecte les sections
-                first_cell = row[0].strip().upper() if row else ""
-                if "PRODUITS" in first_cell:
-                    current_section = "Produits"
-                    continue
-                elif "CHARGES" in first_cell:
-                    current_section = "Charges locatives"
-                    continue
-                elif "BÉNÉFICE" in first_cell:
-                    current_section = "Bénéfice"
-                    continue
+            # Si aucun tableau n'est détecté, essaie une autre configuration
+            if not tables:
+                tables = page.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines"
+                })
 
-                # Ignore les lignes vides ou les en-têtes
-                if not row[0] or row[0].strip().upper() in ["TOTAL", "BÉNÉFICE D'EXPLOITATION", "BÉNÉFICE AVANT IMPÔTS"]:
-                    continue
+            for table in tables:
+                for row in table:
+                    if len(row) < 3:  # Ignore les lignes sans 3 colonnes
+                        continue
 
-                # Extrait les montants
-                poste = row[0].strip()
-                montants = []
-                for value in row[1:]:
-                    if isinstance(value, str):
-                        montant_str = re.sub(r'[^\d.,]', '', value.strip())
-                        if montant_str:
-                            try:
-                                montant = float(montant_str.replace(',', '.'))
-                                montants.append(montant)
-                            except:
-                                continue
+                    # Nettoie les données de la ligne
+                    libelle = row[0].strip()
+                    montant_2020 = clean_montant(row[1])
+                    montant_2019 = clean_montant(row[2])
 
-                if montants and poste:
-                    poste_anonymise = anonymize_text(poste, company_name)
+                    # Ignore les lignes sans libellé ou sans montants
+                    if not libelle or (montant_2020 is None and montant_2019 is None):
+                        continue
+
+                    # Détecte la section actuelle
+                    current_section = None
+                    if "PRODUITS" in libelle.upper():
+                        current_section = "Produits"
+                        continue  # Ignore les en-têtes de section
+                    elif "CHARGES" in libelle.upper():
+                        current_section = "Charges locatives"
+                        continue
+                    elif "BÉNÉFICE" in libelle.upper():
+                        current_section = "Bénéfice"
+                        continue
+
+                    # Ajoute le compte
+                    poste_anonymise = anonymize_text(libelle, company_name)
                     comptes.append({
                         "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
                         "nom": poste_anonymise,
                         "etat": "etat_des_resultats",
                         "section": current_section or "Autre",
-                        "montant_annee_courante": montants[0] if len(montants) > 0 else None,
-                        "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
+                        "montant_annee_courante": montant_2020,
+                        "montant_annee_precedente": montant_2019,
                         "reference_annexe": None,
-                        "page_source": pdf.pages.index(pdf.pages[0]) + 1  # À ajuster si multi-pages
+                        "page_source": pdf.pages.index(page) + 1
                     })
 
-        # 4. Retourne le JSON final
         return {
             "metadata": {
                 "entreprise_id": entreprise_id,
