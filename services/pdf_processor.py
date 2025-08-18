@@ -37,7 +37,7 @@ def clean_montant(text):
         return None
 
 def process_pdf(file):
-    """Traite le PDF en forçant 3 colonnes : libellé, montant 2020, montant 2019."""
+    """Traite le PDF en extrayant directement les lignes avec des montants."""
     with pdfplumber.open(file) as pdf:
         full_text = ""
         comptes = []
@@ -54,68 +54,49 @@ def process_pdf(file):
         annee_etats = detecter_annee_etats(first_page_text)
         date_complete = detecter_date_complete(first_page_text)
 
-        # 2. Extrait le texte complet pour référence
+        # 2. Traite chaque page
+        current_section = None
         for page in pdf.pages:
             page_text = page.extract_text() or ocr_image(page.to_image().original)
             full_text += page_text + "\n"
 
-        # 3. Extrait les tableaux avec une configuration optimisée pour 3 colonnes
-        for page in pdf.pages:
-            # Utilise des paramètres stricts pour forcer 3 colonnes
-            tables = page.extract_tables({
-                "vertical_strategy": "text",
-                "horizontal_strategy": "text",
-                "explicit_vertical_lines": [],
-                "explicit_horizontal_lines": [],
-                "snap_tolerance": 3,
-                "join_tolerance": 3
-            })
+            # 3. Extrait les lignes avec des montants
+            lines = page_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
 
-            # Si aucun tableau n'est détecté, essaie une autre configuration
-            if not tables:
-                tables = page.extract_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines"
-                })
+                # Détecte les sections
+                if line.upper().startswith("PRODUITS"):
+                    current_section = "Produits"
+                    continue
+                elif line.upper().startswith("CHARGES"):
+                    current_section = "Charges locatives"
+                    continue
+                elif line.upper().startswith("BÉNÉFICE"):
+                    current_section = "Bénéfice"
+                    continue
 
-            for table in tables:
-                for row in table:
-                    if len(row) < 3:  # Ignore les lignes sans 3 colonnes
-                        continue
+                # Cherche les lignes avec des montants (ex: "Assurances 963 842")
+                match = re.match(r'^(.*?)\s+(\d[\d\s.,]*)\s+(\d[\d\s.,]*)$', line)
+                if match:
+                    poste = match.group(1).strip()
+                    montant_2020 = clean_montant(match.group(2))
+                    montant_2019 = clean_montant(match.group(3))
 
-                    # Nettoie les données de la ligne
-                    libelle = row[0].strip()
-                    montant_2020 = clean_montant(row[1])
-                    montant_2019 = clean_montant(row[2])
-
-                    # Ignore les lignes sans libellé ou sans montants
-                    if not libelle or (montant_2020 is None and montant_2019 is None):
-                        continue
-
-                    # Détecte la section actuelle
-                    current_section = None
-                    if "PRODUITS" in libelle.upper():
-                        current_section = "Produits"
-                        continue  # Ignore les en-têtes de section
-                    elif "CHARGES" in libelle.upper():
-                        current_section = "Charges locatives"
-                        continue
-                    elif "BÉNÉFICE" in libelle.upper():
-                        current_section = "Bénéfice"
-                        continue
-
-                    # Ajoute le compte
-                    poste_anonymise = anonymize_text(libelle, company_name)
-                    comptes.append({
-                        "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
-                        "nom": poste_anonymise,
-                        "etat": "etat_des_resultats",
-                        "section": current_section or "Autre",
-                        "montant_annee_courante": montant_2020,
-                        "montant_annee_precedente": montant_2019,
-                        "reference_annexe": None,
-                        "page_source": pdf.pages.index(page) + 1
-                    })
+                    if poste and (montant_2020 is not None or montant_2019 is not None):
+                        poste_anonymise = anonymize_text(poste, company_name)
+                        comptes.append({
+                            "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
+                            "nom": poste_anonymise,
+                            "etat": "etat_des_resultats",
+                            "section": current_section or "Autre",
+                            "montant_annee_courante": montant_2020,
+                            "montant_annee_precedente": montant_2019,
+                            "reference_annexe": None,
+                            "page_source": pdf.pages.index(page) + 1
+                        })
 
         return {
             "metadata": {
