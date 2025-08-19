@@ -37,20 +37,24 @@ def clean_montant(text):
         return None
 
 def determine_column_positions(page):
-    """Première passe : Détermine les positions des colonnes."""
+    """Première passe : Détermine les positions des colonnes et affiche des infos de débogage."""
     text = page.extract_text() or ocr_image(page.to_image().original)
     lines = text.split('\n')
 
     # Trouve la position maximale de la fin des mots dans la première colonne
     max_first_column_end = 0
+    longest_word = ""
     dollar_positions = []
 
     for line in lines[:5]:  # Analyse les 5 premières lignes
         # Trouve la fin de la première colonne (position max des mots)
         words = re.findall(r'\S+', line)
         if words:
-            # Position de la fin du dernier mot de la première colonne
-            first_word_end = len(words[0]) if words else 0
+            for word in words:
+                if not re.search(r'\d', word):  # Ignore les mots avec des chiffres (montants)
+                    if len(word) > len(longest_word):
+                        longest_word = word
+            first_word_end = len(line.split('$')[0]) if '$' in line else len(line)
             if first_word_end > max_first_column_end:
                 max_first_column_end = first_word_end
 
@@ -58,11 +62,18 @@ def determine_column_positions(page):
         for match in re.finditer(r'\$', line):
             dollar_positions.append(match.start())
 
+    # Affiche les infos de débogage
+    print(f"Plus long mot de la première colonne: '{longest_word}' (longueur: {len(longest_word)})")
+    print(f"Position de fin de la première colonne: {max_first_column_end}")
+    print(f"Positions des '$' détectées: {dollar_positions}")
+
     # Détermine les positions des colonnes
     if dollar_positions:
         second_column_end = min(dollar_positions) if dollar_positions else max_first_column_end + 10
     else:
         second_column_end = max_first_column_end + 10
+
+    print(f"Position de fin de la deuxième colonne: {second_column_end}")
 
     return max_first_column_end, second_column_end
 
@@ -105,6 +116,7 @@ def process_pdf(file):
                     line_upper = line.upper()
                     if any(section in line_upper for section in ["PRODUITS", "CHARGES", "BÉNÉFICE"]):
                         current_section = line
+                        print(f"Section détectée: {current_section}")
                         continue
 
                 # Extrait les données en utilisant les positions des colonnes
@@ -112,6 +124,11 @@ def process_pdf(file):
                     poste = line[:first_col_end].strip()
                     montant_2020_part = line[first_col_end:second_col_end].strip()
                     montant_2019_part = line[second_col_end:].strip()
+
+                    print(f"Ligne traitée: '{line}'")
+                    print(f"  Libellé: '{poste}'")
+                    print(f"  Montant 2020: '{montant_2020_part}'")
+                    print(f"  Montant 2019: '{montant_2019_part}'")
 
                     montant_2020 = clean_montant(montant_2020_part)
                     montant_2019 = clean_montant(montant_2019_part)
