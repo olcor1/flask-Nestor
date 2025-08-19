@@ -1,3 +1,41 @@
+import pdfplumber
+import pytesseract
+from PIL import Image
+import uuid
+from datetime import datetime
+import spacy
+import re
+from .anonymizer import anonymize_text
+from .financial_utils import (
+    detecter_date_complete,
+    detecter_annee_etats,
+    detecter_type_etats_financiers
+)
+
+# Charge le modèle spaCy
+nlp = spacy.load("fr_core_news_md")
+
+def ocr_image(image):
+    """Effectue l'OCR sur une image avec gestion des erreurs."""
+    try:
+        return pytesseract.image_to_string(image, lang='fra+eng')
+    except:
+        return ""
+
+def generer_id_unique(prefix: str = "ENT") -> str:
+    """Génère un ID unique pour l'entreprise."""
+    return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
+
+def clean_montant(text):
+    """Nettoie un montant (ex: '155 780$' → 155780.0)."""
+    if not text:
+        return None
+    text = re.sub(r'[^\d.,]', '', text.strip())
+    try:
+        return float(text.replace(',', '.')) if text else None
+    except:
+        return None
+
 def extract_words_in_range(page, x_start, x_end):
     """Extrait le texte dans une plage de positions X."""
     words = []
