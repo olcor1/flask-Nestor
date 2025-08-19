@@ -1,86 +1,25 @@
-import pdfplumber
-import pytesseract
-from PIL import Image
-import uuid
-from datetime import datetime
-import spacy
-import re
-from .anonymizer import anonymize_text
-from .financial_utils import (
-    detecter_date_complete,
-    detecter_annee_etats,
-    detecter_type_etats_financiers
-)
-
-# Charge le modèle spaCy
-nlp = spacy.load("fr_core_news_md")
-
-def ocr_image(image):
-    """Effectue l'OCR sur une image avec gestion des erreurs."""
-    try:
-        return pytesseract.image_to_string(image, lang='fra+eng')
-    except:
-        return ""
-
-def generer_id_unique(prefix: str = "ENT") -> str:
-    """Génère un ID unique pour l'entreprise."""
-    return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
-
-def clean_montant(text):
-    """Nettoie un montant (ex: '155 780$' → 155780.0)."""
-    if not text:
-        return None
-    text = re.sub(r'[^\d.,]', '', text.strip())
-    try:
-        return float(text.replace(',', '.')) if text else None
-    except:
-        return None
-
-def find_column_positions(page):
-    """Trouve les positions X des colonnes en analysant les 5 premières lignes."""
-    words = page.chars  # Tous les caractères avec leurs positions X/Y
-
-    # Trouve la position X maximale des mots de la 1ère colonne (sans chiffres)
-    max_x_first_col = 0
-    longest_poste = {"text": "", "x_end": 0}
-
-    # Trouve les positions X des "$" pour les colonnes de montants
-    dollar_positions = []
-
-    for char in words:
-        if char["text"].isdigit() or char["text"] == "$":
-            if char["text"] == "$":
-                dollar_positions.append(char["x0"])
-        else:
-            # Trouve le mot le plus long (sans chiffres)
-            if not any(c.isdigit() for c in char["text"]):
-                word_length = len(char["text"].strip())
-                word_x_end = char["x1"]
-                if word_x_end > max_x_first_col and word_length > len(longest_poste["text"]):
-                    max_x_first_col = word_x_end
-                    longest_poste = {"text": char["text"].strip(), "x_end": word_x_end}
-
-    # Détermine les positions X des colonnes
-    first_col_end = max_x_first_col if max_x_first_col > 0 else 200  # Valeur par défaut
-    second_col_end = min(dollar_positions) if dollar_positions else first_col_end + 100
-
-    return {
-        "longest_poste": longest_poste,
-        "first_col_end": first_col_end,
-        "dollar_positions": dollar_positions,
-        "second_col_end": second_col_end
-    }
-
 def extract_words_in_range(page, x_start, x_end):
     """Extrait le texte dans une plage de positions X."""
-    words = page.chars
-    text_parts = []
+    words = []
+    current_word = []
+    prev_char = None
 
-    for char in words:
+    for char in page.chars:
         if x_start <= char["x0"] <= x_end:
-            text_parts.append(char["text"])
+            # Regrouper les caractères en mots en fonction de leur proximité sur l'axe X
+            if prev_char and abs(char["x0"] - prev_char["x1"]) < 5:  # Seuil de proximité pour les caractères d'un même mot
+                current_word.append(char["text"])
+            else:
+                if current_word:
+                    words.append("".join(current_word))
+                    current_word = []
+                current_word.append(char["text"])
+            prev_char = char
 
-    return "".join(text_parts).strip()
+    if current_word:
+        words.append("".join(current_word))
+
+    return " ".join(words).strip()
 
 def parse_financial_page(page):
     """Parse une page financière en utilisant les positions X."""
