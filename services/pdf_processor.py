@@ -91,9 +91,8 @@ def find_column_positions(page):
         "second_col_end": second_col_end
     }
 
-def parse_financial_page(page):
+def parse_financial_page(page, column_info):
     """Parse une page financière en utilisant les positions X."""
-    column_info = find_column_positions(page)
     first_col_end = column_info["first_col_end"]
     second_col_end = column_info["second_col_end"]
 
@@ -181,7 +180,11 @@ def process_pdf(file):
             page_text = page.extract_text() or ocr_image(page.to_image().original)
             full_text += page_text + "\n"
 
-            parsed_page = parse_financial_page(page)
+            # Obtenir les positions des colonnes pour cette page
+            column_info = find_column_positions(page)
+
+            # Analyser la page financière
+            parsed_page = parse_financial_page(page, column_info)
             parsed_page["page_num"] = page_num + 1
             result["pages"].append(parsed_page)
 
@@ -210,3 +213,8 @@ def process_pdf(file):
         }
 
         return result
+
+# Exemple d'utilisation
+file_path = "Test OCR.pdf"
+result = process_pdf(file_path)
+print(result)
