@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 import spacy
 import re
+import logging
 from .anonymizer import anonymize_text
 from .financial_utils import (
     detecter_date_complete,
@@ -12,14 +13,38 @@ from .financial_utils import (
     detecter_type_etats_financiers
 )
 
-# Charge le modèle spaCy
-nlp = spacy.load("fr_core_news_md")
+# Configure logging to capture logs in a list
+logs = []
+
+class ListHandler(logging.Handler):
+    def __init__(self, log_list):
+        super().__init__()
+        self.log_list = log_list
+
+    def emit(self, record):
+        self.log_list.append(self.format(record))
+
+# Create a custom logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = ListHandler(logs)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# Load spaCy model
+try:
+    nlp = spacy.load("fr_core_news_md")
+except Exception as e:
+    logger.error(f"Failed to load spaCy model: {e}")
+    raise
 
 def ocr_image(image):
     """Effectue l'OCR sur une image avec gestion des erreurs."""
     try:
         return pytesseract.image_to_string(image, lang='fra+eng')
-    except:
+    except Exception as e:
+        logger.error(f"OCR failed: {e}")
         return ""
 
 def generer_id_unique(prefix: str = "ENT") -> str:
@@ -104,18 +129,22 @@ def parse_financial_page(page, column_info):
     }
 
     # Extraire le tableau avec les colonnes définies
-    table = page.extract_table(table_settings)
+    try:
+        table = page.extract_table(table_settings)
+    except Exception as e:
+        logger.error(f"Failed to extract table: {e}")
+        return {
+            "sections": [],
+            "postes": [],
+            "totaux": [],
+            "debug_info": column_info
+        }
 
     data = {
         "sections": [],
         "postes": [],
         "totaux": [],
-        "debug_info": {
-            "longest_poste": column_info["longest_poste"],
-            "first_col_end": first_col_end,
-            "dollar_positions": column_info["dollar_positions"],
-            "second_col_end": second_col_end
-        }
+        "debug_info": column_info
     }
 
     current_section = None
@@ -164,57 +193,72 @@ def parse_financial_page(page, column_info):
 
     return data
 
-def process_pdf(file):
+def process_pdf(file_path):
     """Traite le PDF en utilisant les coordonnées X pour les colonnes."""
-    with pdfplumber.open(file) as pdf:
-        full_text = ""
-        result = {
-            "metadata": {},
-            "pages": [],
-            "debug_info": {}
-        }
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            full_text = ""
+            result = {
+                "metadata": {},
+                "pages": [],
+                "debug_info": {},
+                "logs": []
+            }
 
-        entreprise_id = generer_id_unique()
+            entreprise_id = generer_id_unique()
 
-        for page_num, page in enumerate(pdf.pages):
-            page_text = page.extract_text() or ocr_image(page.to_image().original)
-            full_text += page_text + "\n"
+            for page_num, page in enumerate(pdf.pages):
+                try:
+                    page_text = page.extract_text() or ocr_image(page.to_image().original)
+                    full_text += page_text + "\n"
 
-            # Obtenir les positions des colonnes pour cette page
-            column_info = find_column_positions(page)
+                    # Obtenir les positions des colonnes pour cette page
+                    column_info = find_column_positions(page)
 
-            # Analyser la page financière
-            parsed_page = parse_financial_page(page, column_info)
-            parsed_page["page_num"] = page_num + 1
-            result["pages"].append(parsed_page)
+                    # Analyser la page financière
+                    parsed_page = parse_financial_page(page, column_info)
+                    parsed_page["page_num"] = page_num + 1
+                    result["pages"].append(parsed_page)
 
-            # Met à jour les infos de debug globales
-            if "debug_info" in parsed_page:
-                result["debug_info"].update(parsed_page["debug_info"])
+                    # Met à jour les infos de debug globales
+                    if "debug_info" in parsed_page:
+                        result["debug_info"].update(parsed_page["debug_info"])
+                except Exception as e:
+                    logger.error(f"Failed to process page {page_num}: {e}")
+                    continue
 
-        # Métadonnées
-        first_page_text = pdf.pages[0].extract_text() or ocr_image(pdf.pages[0].to_image().original)
-        doc = nlp(first_page_text)
-        company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
+            # Métadonnées
+            if pdf.pages:
+                first_page_text = pdf.pages[0].extract_text() or ocr_image(pdf.pages[0].to_image().original)
+                doc = nlp(first_page_text)
+                company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
 
-        ef_info = detecter_type_etats_financiers(first_page_text)
-        annee_etats = detecter_annee_etats(first_page_text)
-        date_complete = detecter_date_complete(first_page_text)
+                ef_info = detecter_type_etats_financiers(first_page_text)
+                annee_etats = detecter_annee_etats(first_page_text)
+                date_complete = detecter_date_complete(first_page_text)
 
-        result["metadata"] = {
-            "entreprise_id": entreprise_id,
-            "nom_entreprise_anonymise": company_name,
-            "annee_etats_financiers": annee_etats,
-            "date_etats_financiers": date_complete,
-            "type_etats_financiers": ef_info["type"],
-            "est_consolide": ef_info["consolide"],
-            "date_extraction": datetime.now().strftime("%Y-%m-%d"),
-            "source": file.filename
-        }
+                result["metadata"] = {
+                    "entreprise_id": entreprise_id,
+                    "nom_entreprise_anonymise": company_name,
+                    "annee_etats_financiers": annee_etats,
+                    "date_etats_financiers": date_complete,
+                    "type_etats_financiers": ef_info["type"],
+                    "est_consolide": ef_info["consolide"],
+                    "date_extraction": datetime.now().strftime("%Y-%m-%d"),
+                    "source": file_path
+                }
 
-        return result
+            result["logs"] = logs
+            return result
+    except Exception as e:
+        logger.error(f"Failed to process PDF: {e}")
+        return {"status": "error", "message": str(e), "logs": logs}
 
 # Exemple d'utilisation
 file_path = "Test OCR.pdf"
-result = process_pdf(file_path)
-print(result)
+try:
+    result = process_pdf(file_path)
+    print(result)
+except Exception as e:
+    logger.error(f"Failed to process PDF: {e}")
+    print({"status": "error", "message": str(e), "logs": logs})
