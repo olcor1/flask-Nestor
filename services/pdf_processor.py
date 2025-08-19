@@ -80,24 +80,51 @@ def merge_columns(postes, col2, col3):
     return result
 
 def process_pdf(file):
-    """Processus ligne par ligne, extraction poste et montants avec regex robuste."""
+    import re
     results = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             lines = page.extract_text().split('\n')
             for ligne in lines:
-                # Regex qui tolère tous symboles et montants à droite
-                match = re.match(
-                    r'^([A-Za-zÀ-ÿ\s\(\)\-\.]+?)\s+(\d{1,3}(?:\s\d{3})*)(?:\s*\$\s*|\s+)(\d{1,3}(?:\s\d{3})*)?\s*\$?', 
-                    ligne)
-                if match:
-                    poste = match.group(1).strip()
-                    montant1 = int(match.group(2).replace(" ", "")) if match.group(2) else None
-                    montant2 = int(match.group(3).replace(" ", "")) if match.group(3) else None
-                    results.append({
-                        "poste": poste,
-                        "annee_courante": montant1,
-                        "annee_precedente": montant2
-                    })
+                parsed = parse_ligne(ligne)
+                if parsed and parsed['poste']:
+                    results.append(parsed)
     return results
+
+
+def parse_ligne(ligne):
+    # Ce regex capture : tout le texte (poste) puis 1 ou 2 champs de montants (nombre+espace+, "-" ou "- $", $ possible)
+    # Exemples gérés : 225 000  $  382 353  $  /  -  /  (11 860) etc.
+    match = re.match(
+        r'''^
+        ([A-Za-zÀ-ÿ\s\(\)\-\.']+?)                # poste : tout texte + espaces jusqu'au premier nombre
+        \s+([-]|\d{1,3}(?:\s\d{3})*)\s*\$?        # montant 1 : nombre ou - (+ $ facultatif)
+        (?:\s+([-]|\d{1,3}(?:\s\d{3})*)\s*\$?)?   # montant 2 : nombre ou - (+ $ facultatif, optionnel)
+        $''', ligne, re.VERBOSE)
+    if match:
+        poste = match.group(1).strip()
+        montant1 = match.group(2)
+        montant2 = match.group(3) if match.group(3) else None
+        
+        # Montant: '-'=>0, sinon, enlever les espaces puis int
+        def montant_to_int(m):
+            if m is None:
+                return None
+            m = m.replace(" ", "")
+            if m == "-":
+                return 0
+            if m.startswith("(") and m.endswith(")"):
+                return -int(m[1:-1].replace(" ", ""))
+            try:
+                return int(m)
+            except Exception:
+                return None
+
+        return {
+            "poste": poste,
+            "annee_courante": montant_to_int(montant1),
+            "annee_precedente": montant_to_int(montant2)
+        }
+    return None
+    
 
