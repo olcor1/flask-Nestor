@@ -14,99 +14,24 @@ def ocr_image(image):
     except Exception:
         return ""
 
-def is_poste_char(c):
-    """Détermine si un caractère fait partie du poste (lettres, chiffres, espaces, parenthèses)."""
-    return c['text'].isalnum() or c['text'] in [' ', '(', ')']
-
-def detect_column_positions(page):
-    chars = page.chars
-    postes_chars = [c for c in chars if is_poste_char(c)]
-    montant_chars = [c for c in chars if c['text'].isdigit()]
-    poste_fin_x = max(c['x1'] for c in postes_chars) if postes_chars else 0
-    montant_apres_poste = [c for c in montant_chars if c['x0'] > poste_fin_x]
-    colonne_2_fin_x = max(c['x1'] for c in montant_apres_poste) if montant_apres_poste else poste_fin_x + 100
-    return poste_fin_x, colonne_2_fin_x
-
-def extract_text_by_bbox(page, bbox):
-    chars = [c for c in page.chars if 
-             c['x0'] >= bbox[0] and c['x1'] <= bbox[2] and 
-             c['top'] >= bbox[1] and c['bottom'] <= bbox[3]]
-
-    lines = []
-    line_tolerance = 3
-    chars = sorted(chars, key=lambda c: (c['top'], c['x0']))
-    current_line = []
-    current_top = None
-
-    for c in chars:
-        if current_top is None or abs(c['top'] - current_top) <= line_tolerance:
-            current_line.append(c)
-            if current_top is None:
-                current_top = c['top']
-        else:
-            lines.append(current_line)
-            current_line = [c]
-            current_top = c['top']
-    if current_line:
-        lines.append(current_line)
-
-    lines_text = []
-    for line_chars in lines:
-        line_text = "".join(c['text'] for c in sorted(line_chars, key=lambda c: c['x0']))
-        lines_text.append(line_text.strip())
-    return lines_text
-
-def merge_columns(postes, col2, col3):
-    result = []
-    max_lines = max(len(postes), len(col2), len(col3))
-    for i in range(max_lines):
-        poste = postes[i] if i < len(postes) else ""
-        c2 = col2[i] if i < len(col2) else ""
-        c3 = col3[i] if i < len(col3) else ""
-        
-        def clean_montant(m):
-            m_clean = m.replace(" ", "")
-            return int(m_clean) if m_clean.isdigit() else None
-        
-        annee_courante = clean_montant(c2)
-        annee_precedente = clean_montant(c3)
-        
-        if poste:
-            result.append({
-                "poste": poste,
-                "annee_courante": annee_courante,
-                "annee_precedente": annee_precedente
-            })
-    return result
-
-def process_pdf(file):
-    import re
-    results = []
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            lines = page.extract_text().split('\n')
-            for ligne in lines:
-                parsed = parse_ligne(ligne)
-                if parsed and parsed['poste']:
-                    results.append(parsed)
-    return results
-
-
 def parse_ligne(ligne):
-    # Ce regex capture : tout le texte (poste) puis 1 ou 2 champs de montants (nombre+espace+, "-" ou "- $", $ possible)
-    # Exemples gérés : 225 000  $  382 353  $  /  -  /  (11 860) etc.
+    """
+    Parse une ligne de texte pour extraire le poste, le montant année courante et le montant année précédente.
+
+    Gère les montants vides représentés par "-", les montants négatifs entre parenthèses "(…)",
+    et les montants avec séparateur de milliers espace.
+    """
     match = re.match(
         r'''^
-        ([A-Za-zÀ-ÿ\s\(\)\-\.']+?)                # poste : tout texte + espaces jusqu'au premier nombre
-        \s+([-]|\d{1,3}(?:\s\d{3})*)\s*\$?        # montant 1 : nombre ou - (+ $ facultatif)
-        (?:\s+([-]|\d{1,3}(?:\s\d{3})*)\s*\$?)?   # montant 2 : nombre ou - (+ $ facultatif, optionnel)
-        $''', ligne, re.VERBOSE)
+        ([A-Za-zÀ-ÿ\s\(\)\-\.'’]+?)             # poste : tout texte + espaces jusqu'au premier nombre (tolérance caractères spéciaux)
+        \s+([-]|\(?\d{1,3}(?:\s\d{3})*\)?)\s*\$?   # montant 1 : nombre ou - ou (négatif) (+ $ facultatif)
+        (?:\s+([-]|\(?\d{1,3}(?:\s\d{3})*\)?)\s*\$?)?   # montant 2 : nombre ou - ou (négatif) (+ $ facultatif, optionnel)
+        $''', ligne, re.VERBOSE | re.UNICODE)
     if match:
         poste = match.group(1).strip()
         montant1 = match.group(2)
         montant2 = match.group(3) if match.group(3) else None
-        
-        # Montant: '-'=>0, sinon, enlever les espaces puis int
+
         def montant_to_int(m):
             if m is None:
                 return None
@@ -114,10 +39,13 @@ def parse_ligne(ligne):
             if m == "-":
                 return 0
             if m.startswith("(") and m.endswith(")"):
-                return -int(m[1:-1].replace(" ", ""))
+                try:
+                    return -int(m[1:-1])
+                except ValueError:
+                    return None
             try:
                 return int(m)
-            except Exception:
+            except ValueError:
                 return None
 
         return {
@@ -126,5 +54,23 @@ def parse_ligne(ligne):
             "annee_precedente": montant_to_int(montant2)
         }
     return None
-    
 
+def process_pdf(file):
+    """
+    Traite un PDF donné en fichier ouvert (stream) et extrait les données financières ligne par ligne,
+    renvoie une liste de dictionnaires avec poste et deux années.
+    """
+    results = []
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text or len(text) < 40:
+                # Fallback OCR si texte insuffisant
+                page_image = page.to_image(resolution=300).original
+                text = ocr_image(page_image)
+            lines = text.split('\n')
+            for ligne in lines:
+                parsed = parse_ligne(ligne)
+                if parsed and parsed['poste']:
+                    results.append(parsed)
+    return results
