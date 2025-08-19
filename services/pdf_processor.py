@@ -13,24 +13,7 @@ from .financial_utils import (
     detecter_type_etats_financiers
 )
 
-# Configure logging to capture logs in a list
-logs = []
 
-class ListHandler(logging.Handler):
-    def __init__(self, log_list):
-        super().__init__()
-        self.log_list = log_list
-
-    def emit(self, record):
-        self.log_list.append(self.format(record))
-
-# Create a custom logger
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-handler = ListHandler(logs)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 # Load spaCy model
 try:
@@ -223,9 +206,7 @@ def process_pdf(file_path):
                     # Met à jour les infos de debug globales
                     if "debug_info" in parsed_page:
                         result["debug_info"].update(parsed_page["debug_info"])
-                except Exception as e:
-                    logger.error(f"Failed to process page {page_num}: {e}")
-                    continue
+                
 
             # Métadonnées
             if pdf.pages:
@@ -248,17 +229,4 @@ def process_pdf(file_path):
                     "source": file_path
                 }
 
-            result["logs"] = logs
-            return result
-    except Exception as e:
-        logger.error(f"Failed to process PDF: {e}")
-        return {"status": "error", "message": str(e), "logs": logs}
-
-# Exemple d'utilisation
-file_path = "Test OCR.pdf"
-try:
-    result = process_pdf(file_path)
-    print(result)
-except Exception as e:
-    logger.error(f"Failed to process PDF: {e}")
-    print({"status": "error", "message": str(e), "logs": logs})
+            
