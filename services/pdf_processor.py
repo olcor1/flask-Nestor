@@ -35,8 +35,9 @@ def clean_montant(text):
         return float(text.replace(',', '.')) if text else None
     except:
         return None
+
 def find_column_positions(page):
-    """Trouve les positions X des colonnes en analysant les 5 premières lignes."""
+    """Trouve les positions X des colonnes en analysant les caractères."""
     words = page.chars  # Tous les caractères avec leurs positions X/Y
 
     # Trouve la position X maximale des mots de la 1ère colonne (sans chiffres)
@@ -46,18 +47,38 @@ def find_column_positions(page):
     # Trouve les positions X des "$" pour les colonnes de montants
     dollar_positions = []
 
-    for char in words:
-        if char["text"].isdigit() or char["text"] == "$":
-            if char["text"] == "$":
-                dollar_positions.append(char["x0"])
+    # Regrouper les caractères en mots
+    words_in_page = []
+    current_word = []
+    prev_char = None
+
+    for char in sorted(words, key=lambda c: (c["top"], c["x0"])):
+        if prev_char and abs(char["x0"] - prev_char["x1"]) < 5:  # Seuil de proximité pour les caractères d'un même mot
+            current_word.append(char)
         else:
-            # Trouve le mot le plus long (sans chiffres)
-            if not any(c.isdigit() for c in char["text"]):
-                word_length = len(char["text"].strip())
-                word_x_end = char["x1"]
-                if word_x_end > max_x_first_col and word_length > len(longest_poste["text"]):
-                    max_x_first_col = word_x_end
-                    longest_poste = {"text": char["text"].strip(), "x_end": word_x_end}
+            if current_word:
+                words_in_page.append(current_word)
+                current_word = []
+            current_word.append(char)
+        prev_char = char
+
+    if current_word:
+        words_in_page.append(current_word)
+
+    # Parcourir les mots pour trouver le plus long et les positions des "$"
+    for word_chars in words_in_page:
+        word_text = "".join([c["text"] for c in word_chars]).strip()
+        word_x_end = max(c["x1"] for c in word_chars)
+
+        if not any(c.isdigit() for c in word_text):  # Ignore les mots avec des chiffres (montants)
+            if word_x_end > max_x_first_col and len(word_text) > len(longest_poste["text"]):
+                max_x_first_col = word_x_end
+                longest_poste = {"text": word_text, "x_end": word_x_end}
+
+        if "$" in word_text:
+            for char in word_chars:
+                if char["text"] == "$":
+                    dollar_positions.append(char["x0"])
 
     # Détermine les positions X des colonnes
     first_col_end = max_x_first_col if max_x_first_col > 0 else 200  # Valeur par défaut
