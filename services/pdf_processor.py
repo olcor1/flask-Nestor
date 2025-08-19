@@ -1,6 +1,4 @@
 import pdfplumber
-import camelot
-import pandas as pd
 import pytesseract
 from PIL import Image
 import uuid
@@ -28,8 +26,48 @@ def generer_id_unique(prefix: str = "ENT") -> str:
     """Génère un ID unique pour l'entreprise."""
     return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
 
+def clean_montant(text):
+    """Nettoie un montant (ex: '155 780$' → 155780.0)."""
+    if not text:
+        return None
+    text = re.sub(r'[^\d]', '', text.strip())
+    try:
+        return float(text) if text else None
+    except:
+        return None
+
+def determine_column_positions(page):
+    """Première passe : Détermine les positions des colonnes."""
+    text = page.extract_text() or ocr_image(page.to_image().original)
+    lines = text.split('\n')
+
+    # Trouve la position maximale de la fin des mots dans la première colonne
+    max_first_column_end = 0
+    dollar_positions = []
+
+    for line in lines[:5]:  # Analyse les 5 premières lignes
+        # Trouve la fin de la première colonne (position max des mots)
+        words = re.findall(r'\S+', line)
+        if words:
+            # Position de la fin du dernier mot de la première colonne
+            first_word_end = len(words[0]) if words else 0
+            if first_word_end > max_first_column_end:
+                max_first_column_end = first_word_end
+
+        # Trouve les positions des "$" pour les colonnes suivantes
+        for match in re.finditer(r'\$', line):
+            dollar_positions.append(match.start())
+
+    # Détermine les positions des colonnes
+    if dollar_positions:
+        second_column_end = min(dollar_positions) if dollar_positions else max_first_column_end + 10
+    else:
+        second_column_end = max_first_column_end + 10
+
+    return max_first_column_end, second_column_end
+
 def process_pdf(file):
-    """Traite le PDF avec Camelot pour extraire les tableaux."""
+    """Traite le PDF en deux passes : 1. Détermination des colonnes, 2. Extraction des données."""
     with pdfplumber.open(file) as pdf:
         full_text = ""
         comptes = []
@@ -46,62 +84,57 @@ def process_pdf(file):
         annee_etats = detecter_annee_etats(first_page_text)
         date_complete = detecter_date_complete(first_page_text)
 
-        # 2. Utilise Camelot pour extraire les tableaux
-        tables = camelot.read_pdf(file, flavor='stream', pages='all')
+        # 2. Première passe : Détermine les positions des colonnes
+        first_page = pdf.pages[0]
+        first_col_end, second_col_end = determine_column_positions(first_page)
 
-        # 3. Traite chaque tableau
+        # 3. Deuxième passe : Extrait les données
         current_section = None
-        for table in tables:
-            df = table.df  # DataFrame pandas du tableau
+        for page in pdf.pages:
+            page_text = page.extract_text() or ocr_image(page.to_image().original)
+            full_text += page_text + "\n"
 
-            # Détecte la section à partir de la première ligne du tableau
-            first_row = df.iloc[0, 0] if not df.empty else ""
-            if pd.notna(first_row):
-                first_row_upper = str(first_row).upper()
-                if "PRODUITS" in first_row_upper:
-                    current_section = "Produits"
-                elif "CHARGES" in first_row_upper:
-                    current_section = "Charges locatives"
-                elif "BÉNÉFICE" in first_row_upper:
-                    current_section = "Bénéfice"
-
-            # Parcourt les lignes du tableau (en ignorant l'en-tête)
-            for _, row in df.iterrows():
-                # Ignore les lignes vides ou les en-têtes
-                if row.isna().all() or pd.isna(row.iloc[0]):
+            lines = page_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
 
-                # La première colonne = libellé, les suivantes = montants
-                poste = str(row.iloc[0]).strip()
-                if not poste or poste.upper() in ["PRODUITS", "CHARGES LOCATIVES", "TOTAL", "BÉNÉFICE"]:
-                    continue
+                # Détection automatique des sections
+                if not any(c.isdigit() for c in line):  # Ligne sans chiffres = section probable
+                    line_upper = line.upper()
+                    if any(section in line_upper for section in ["PRODUITS", "CHARGES", "BÉNÉFICE"]):
+                        current_section = line
+                        continue
 
-                # Extrait les montants des colonnes suivantes
-                montants = []
-                for value in row.iloc[1:]:
-                    if pd.notna(value):
-                        montant_str = re.sub(r'[^\d.,]', '', str(value))
-                        if montant_str:
-                            try:
-                                montant = float(montant_str.replace(',', '.'))
-                                montants.append(montant)
-                            except:
-                                continue
+                # Extrait les données en utilisant les positions des colonnes
+                if len(line) > second_col_end:
+                    poste = line[:first_col_end].strip()
+                    montant_2020_part = line[first_col_end:second_col_end].strip()
+                    montant_2019_part = line[second_col_end:].strip()
 
-                if montants and poste:
-                    poste_anonymise = anonymize_text(poste, company_name)
-                    comptes.append({
-                        "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
-                        "nom": poste_anonymise,
-                        "etat": "etat_des_resultats",
-                        "section": current_section or "Autre",
-                        "montant_annee_courante": montants[0] if len(montants) > 0 else None,
-                        "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
-                        "reference_annexe": None,
-                        "page_source": table.page  # Numéro de page
-                    })
+                    montant_2020 = clean_montant(montant_2020_part)
+                    montant_2019 = clean_montant(montant_2019_part)
 
-        # 4. Retourne le JSON final
+                    montants = []
+                    if montant_2020 is not None:
+                        montants.append(montant_2020)
+                    if montant_2019 is not None:
+                        montants.append(montant_2019)
+
+                    if poste and montants:
+                        poste_anonymise = anonymize_text(poste, company_name)
+                        comptes.append({
+                            "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
+                            "nom": poste_anonymise,
+                            "etat": "etat_des_resultats",
+                            "section": current_section or "Autre",
+                            "montant_annee_courante": montants[0] if len(montants) > 0 else None,
+                            "montant_annee_precedente": montants[1] if len(montants) > 1 else None,
+                            "reference_annexe": None,
+                            "page_source": pdf.pages.index(page) + 1
+                        })
+
         return {
             "metadata": {
                 "entreprise_id": entreprise_id,
