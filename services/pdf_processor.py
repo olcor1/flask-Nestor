@@ -1,5 +1,30 @@
 import pdfplumber
+import pytesseract
+from PIL import Image
+import uuid
+from datetime import datetime
+import spacy
 import re
+from .anonymizer import anonymize_text
+from .financial_utils import (
+    detecter_date_complete,
+    detecter_annee_etats,
+    detecter_type_etats_financiers
+)
+
+# Charge le modèle spaCy
+nlp = spacy.load("fr_core_news_md")
+
+def ocr_image(image):
+    """Effectue l'OCR sur une image avec gestion des erreurs."""
+    try:
+        return pytesseract.image_to_string(image, lang='fra+eng')
+    except:
+        return ""
+
+def generer_id_unique(prefix: str = "ENT") -> str:
+    """Génère un ID unique pour l'entreprise."""
+    return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
 
 def find_column_positions(page):
     """Trouve les positions X des colonnes en analysant les caractères."""
@@ -76,20 +101,70 @@ def parse_financial_page(page):
         print(f"Failed to extract table: {e}")
         return None
 
-def process_pdf(file_path):
+def process_pdf(file):
     """Traite le PDF en utilisant les coordonnées X pour les colonnes."""
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            # Traiter uniquement la page 2
-            if len(pdf.pages) >= 2:
-                page = pdf.pages[1]  # Index 1 correspond à la page 2 (index 0 est la page 1)
-                result = parse_financial_page(page)
-                return result
-            else:
-                return {"status": "error", "message": "PDF does not have a second page"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    with pdfplumber.open(file) as pdf:
+        full_text = ""
+        comptes = []
+        entreprise_id = generer_id_unique()
 
-    print(result)
-except Exception as e:
-    print({"status": "error", "message": str(e)})
+        # 1. Première page : métadonnées
+        first_page = pdf.pages[0]
+        first_page_text = first_page.extract_text() or ocr_image(first_page.to_image().original)
+        doc = nlp(first_page_text)
+        company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
+
+        ef_info = detecter_type_etats_financiers(first_page_text)
+        annee_etats = detecter_annee_etats(first_page_text)
+        date_complete = detecter_date_complete(first_page_text)
+
+        # 2. Traite chaque page
+        for page_num, page in enumerate(pdf.pages):
+            page_text = page.extract_text() or ocr_image(page.to_image().original)
+            full_text += page_text + "\n"
+
+            # Analyser la page financière
+            table = parse_financial_page(page)
+            if table:
+                for row in table:
+                    if len(row) >= 3:  # Assurez-vous que la ligne a au moins 3 colonnes
+                        poste, montant1, montant2 = row[0], row[1], row[2]
+                        poste = poste.strip()
+                        montant1 = montant1.strip()
+                        montant2 = montant2.strip()
+
+                        # Nettoyer les montants
+                        montant1_clean = None
+                        montant2_clean = None
+                        if montant1:
+                            montant1_clean = float(re.sub(r'[^\d.,]', '', montant1).replace(',', '.')) if re.sub(r'[^\d.,]', '', montant1) else None
+                        if montant2:
+                            montant2_clean = float(re.sub(r'[^\d.,]', '', montant2).replace(',', '.')) if re.sub(r'[^\d.,]', '', montant2) else None
+
+                        if poste and (montant1_clean is not None or montant2_clean is not None):
+                            comptes.append({
+                                "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
+                                "nom": poste,
+                                "etat": "etat_des_resultats",
+                                "section": None,
+                                "montant_annee_courante": montant1_clean,
+                                "montant_annee_precedente": montant2_clean,
+                                "reference_annexe": None,
+                                "page_source": page_num + 1
+                            })
+
+        return {
+            "metadata": {
+                "entreprise_id": entreprise_id,
+                "nom_entreprise_anonymise": company_name,
+                "annee_etats_financiers": annee_etats,
+                "date_etats_financiers": date_complete,
+                "type_etats_financiers": ef_info["type"],
+                "est_consolide": ef_info["consolide"],
+                "date_extraction": datetime.now().strftime("%Y-%m-%d"),
+                "source": file.filename
+            },
+            "comptes": comptes,
+            "annexes": [],
+            "texte_complet_anonymise": anonymize_text(full_text, company_name)
+        }
