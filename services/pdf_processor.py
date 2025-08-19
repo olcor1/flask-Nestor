@@ -6,14 +6,28 @@ from datetime import datetime
 import spacy
 import re
 import logging
-from .anonymizer import anonymize_text
-from .financial_utils import (
-    detecter_date_complete,
-    detecter_annee_etats,
-    detecter_type_etats_financiers
-)
+import os
+import json
+from werkzeug.datastructures import FileStorage
 
+# Configure logging to capture logs in a list
+logs = []
 
+class ListHandler(logging.Handler):
+    def __init__(self, log_list):
+        super().__init__()
+        self.log_list = log_list
+
+    def emit(self, record):
+        self.log_list.append(self.format(record))
+
+# Create a custom logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = ListHandler(logs)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # Load spaCy model
 try:
@@ -35,7 +49,7 @@ def generer_id_unique(prefix: str = "ENT") -> str:
     return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
 
 def clean_montant(text):
-    """Nettoie un montant (ex: '155 780$' → 155780.0)."""
+    """Nettoie un montant (ex: '155 780\$' → 155780.0)."""
     if not text:
         return None
     text = re.sub(r'[^\d.,]', '', text.strip())
@@ -52,7 +66,7 @@ def find_column_positions(page):
     max_x_first_col = 0
     longest_poste = {"text": "", "x_end": 0}
 
-    # Trouve les positions X des "$" pour les colonnes de montants
+    # Trouve les positions X des "\$" pour les colonnes de montants
     dollar_positions = []
 
     # Regrouper les caractères en mots
@@ -73,7 +87,7 @@ def find_column_positions(page):
     if current_word:
         words_in_page.append(current_word)
 
-    # Parcourir les mots pour trouver le plus long et les positions des "$"
+    # Parcourir les mots pour trouver le plus long et les positions des "\$"
     for word_chars in words_in_page:
         word_text = "".join([c["text"] for c in word_chars]).strip()
         word_x_end = max(c["x1"] for c in word_chars)
@@ -179,6 +193,10 @@ def parse_financial_page(page, column_info):
 def process_pdf(file_path):
     """Traite le PDF en utilisant les coordonnées X pour les colonnes."""
     try:
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return {"status": "error", "message": f"File not found: {file_path}", "logs": logs}
+
         with pdfplumber.open(file_path) as pdf:
             full_text = ""
             result = {
@@ -206,7 +224,9 @@ def process_pdf(file_path):
                     # Met à jour les infos de debug globales
                     if "debug_info" in parsed_page:
                         result["debug_info"].update(parsed_page["debug_info"])
-                
+                except Exception as e:
+                    logger.error(f"Failed to process page {page_num}: {e}")
+                    continue
 
             # Métadonnées
             if pdf.pages:
@@ -214,19 +234,4 @@ def process_pdf(file_path):
                 doc = nlp(first_page_text)
                 company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
 
-                ef_info = detecter_type_etats_financiers(first_page_text)
-                annee_etats = detecter_annee_etats(first_page_text)
-                date_complete = detecter_date_complete(first_page_text)
-
-                result["metadata"] = {
-                    "entreprise_id": entreprise_id,
-                    "nom_entreprise_anonymise": company_name,
-                    "annee_etats_financiers": annee_etats,
-                    "date_etats_financiers": date_complete,
-                    "type_etats_financiers": ef_info["type"],
-                    "est_consolide": ef_info["consolide"],
-                    "date_extraction": datetime.now().strftime("%Y-%m-%d"),
-                    "source": file_path
-                }
-
-            
+                ef_info = detect
