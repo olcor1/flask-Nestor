@@ -91,99 +91,77 @@ def find_column_positions(page):
         "second_col_end": second_col_end
     }
 
-def extract_words_in_range(page, x_start, x_end):
-    """Extrait le texte dans une plage de positions X."""
-    words = []
-    current_word = []
-    prev_char = None
-
-    for char in page.chars:
-        if x_start <= char["x0"] <= x_end:
-            # Regrouper les caractères en mots en fonction de leur proximité sur l'axe X
-            if prev_char and abs(char["x0"] - prev_char["x1"]) < 5:  # Seuil de proximité pour les caractères d'un même mot
-                current_word.append(char["text"])
-            else:
-                if current_word:
-                    words.append("".join(current_word))
-                    current_word = []
-                current_word.append(char["text"])
-            prev_char = char
-
-    if current_word:
-        words.append("".join(current_word))
-
-    return " ".join(words).strip()
-
 def parse_financial_page(page):
     """Parse une page financière en utilisant les positions X."""
     column_info = find_column_positions(page)
+    first_col_end = column_info["first_col_end"]
+    second_col_end = column_info["second_col_end"]
+
+    # Définir les colonnes explicitement
+    table_settings = {
+        "vertical_strategy": "explicit",
+        "horizontal_strategy": "text",
+        "explicit_vertical_lines": [0, first_col_end, second_col_end, page.width]
+    }
+
+    # Extraire le tableau avec les colonnes définies
+    table = page.extract_table(table_settings)
+
     data = {
         "sections": [],
         "postes": [],
         "totaux": [],
         "debug_info": {
             "longest_poste": column_info["longest_poste"],
-            "first_col_end": column_info["first_col_end"],
+            "first_col_end": first_col_end,
             "dollar_positions": column_info["dollar_positions"],
-            "second_col_end": column_info["second_col_end"]
+            "second_col_end": second_col_end
         }
     }
 
     current_section = None
-    words = page.chars
-    lines = {}
 
-    # Regroupe les caractères en lignes (par position Y)
-    for char in words:
-        y = round(char["top"], 1)
-        if y not in lines:
-            lines[y] = []
-        lines[y].append(char)
+    if table:
+        for row in table:
+            if len(row) >= 3:  # Assurez-vous que la ligne a au moins 3 colonnes
+                poste, montant1, montant2 = row[0], row[1], row[2]
+                poste = poste.strip()
+                montant1 = montant1.strip()
+                montant2 = montant2.strip()
 
-    # Traite chaque ligne
-    for y, chars_in_line in sorted(lines.items()):
-        line_text = "".join([c["text"] for c in chars_in_line]).strip()
-        if not line_text:
-            continue
+                montant1_clean = clean_montant(montant1)
+                montant2_clean = clean_montant(montant2)
 
-        # Détection des sections (lignes sans montants)
-        if not re.search(r'\d', line_text):
-            if any(section in line_text.upper() for section in ["PRODUITS", "CHARGES", "ACTIF", "PASSIF", "BÉNÉFICE"]):
-                current_section = line_text
-                data["sections"].append({
-                    "nom": current_section,
-                    "y_position": y
-                })
-            continue
+                # Détection des sections (lignes sans montants)
+                if not montant1_clean and not montant2_clean:
+                    if any(section in poste.upper() for section in ["PRODUITS", "CHARGES", "ACTIF", "PASSIF", "BÉNÉFICE"]):
+                        current_section = poste
+                        data["sections"].append({
+                            "nom": current_section,
+                            "y_position": None  # On ne peut pas obtenir la position Y directement ici
+                        })
+                    continue
 
-        # Extrait les données en utilisant les positions X
-        poste = extract_words_in_range(page, 0, column_info["first_col_end"])
-        montant1 = extract_words_in_range(page, column_info["first_col_end"], column_info["second_col_end"])
-        montant2 = extract_words_in_range(page, column_info["second_col_end"], page.width)
+                if poste and (montant1_clean is not None or montant2_clean is not None):
+                    is_total = poste.upper().startswith(("BÉNÉFICE", "TOTAL", "SOMME"))
 
-        montant1_clean = clean_montant(montant1)
-        montant2_clean = clean_montant(montant2)
+                    data["postes"].append({
+                        "poste": poste,
+                        "montant1": montant1_clean,
+                        "montant2": montant2_clean,
+                        "est_total": is_total,
+                        "section": current_section,
+                        "y_position": None  # On ne peut pas obtenir la position Y directement ici
+                    })
 
-        if poste and (montant1_clean is not None or montant2_clean is not None):
-            is_total = poste.upper().startswith(("BÉNÉFICE", "TOTAL", "SOMME"))
-
-            data["postes"].append({
-                "poste": poste,
-                "montant1": montant1_clean,
-                "montant2": montant2_clean,
-                "est_total": is_total,
-                "section": current_section,
-                "y_position": y
-            })
-
-            if is_total:
-                data["totaux"].append({
-                    "poste": poste,
-                    "montant1": montant1_clean,
-                    "montant2": montant2_clean,
-                    "section": current_section,
-                    "y_position": y
-                })
+                    if is_total:
+                        data["totaux"].append({
+                            "poste": poste,
+                            "montant1": montant1_clean,
+                            "montant2": montant2_clean,
+                            "section": current_section,
+                            "y_position": None  # On ne peut pas obtenir la position Y directement ici
+                        })
 
     return data
 
