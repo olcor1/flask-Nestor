@@ -1,172 +1,103 @@
 import pdfplumber
 import pytesseract
 from PIL import Image
-import uuid
-from datetime import datetime
 import spacy
 import re
-from .anonymizer import anonymize_text
-from .financial_utils import (
-    detecter_date_complete,
-    detecter_annee_etats,
-    detecter_type_etats_financiers
-)
+import json
 
-# Charge le modèle spaCy
 nlp = spacy.load("fr_core_news_md")
 
 def ocr_image(image):
     """Effectue l'OCR sur une image avec gestion des erreurs."""
     try:
         return pytesseract.image_to_string(image, lang='fra+eng')
-    except:
+    except Exception:
         return ""
 
-def generer_id_unique(prefix: str = "ENT") -> str:
-    """Génère un ID unique pour l'entreprise."""
-    return f"{prefix}_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
+def is_poste_char(c):
+    """Détermine si un caractère fait partie du poste (lettres, chiffres, espaces, parenthèses)."""
+    return c['text'].isalnum() or c['text'] in [' ', '(', ')']
 
-def find_column_positions(page):
-    """Trouve les positions X des colonnes en analysant les caractères."""
-    words = page.chars  # Tous les caractères avec leurs positions X/Y
+def detect_column_positions(page):
+    chars = page.chars
+    postes_chars = [c for c in chars if is_poste_char(c)]
+    montant_chars = [c for c in chars if c['text'].isdigit()]
+    poste_fin_x = max(c['x1'] for c in postes_chars) if postes_chars else 0
+    montant_apres_poste = [c for c in montant_chars if c['x0'] > poste_fin_x]
+    colonne_2_fin_x = max(c['x1'] for c in montant_apres_poste) if montant_apres_poste else poste_fin_x + 100
+    return poste_fin_x, colonne_2_fin_x
 
-    # Trouve la position X maximale des mots de la 1ère colonne (sans chiffres)
-    max_x_first_col = 0
-    longest_poste = {"text": "", "x_end": 0}
+def extract_text_by_bbox(page, bbox):
+    chars = [c for c in page.chars if 
+             c['x0'] >= bbox[0] and c['x1'] <= bbox[2] and 
+             c['top'] >= bbox[1] and c['bottom'] <= bbox[3]]
 
-    # Trouve les positions X des "$" pour les colonnes de montants
-    dollar_positions = []
+    lines = []
+    line_tolerance = 3
+    chars = sorted(chars, key=lambda c: (c['top'], c['x0']))
+    current_line = []
+    current_top = None
 
-    # Regrouper les caractères en mots
-    words_in_page = []
-    current_word = []
-    prev_char = None
-
-    for char in sorted(words, key=lambda c: (c["top"], c["x0"])):
-        if prev_char and abs(char["x0"] - prev_char["x1"]) < 5:  # Seuil de proximité pour les caractères d'un même mot
-            current_word.append(char)
+    for c in chars:
+        if current_top is None or abs(c['top'] - current_top) <= line_tolerance:
+            current_line.append(c)
+            if current_top is None:
+                current_top = c['top']
         else:
-            if current_word:
-                words_in_page.append(current_word)
-                current_word = []
-            current_word.append(char)
-        prev_char = char
+            lines.append(current_line)
+            current_line = [c]
+            current_top = c['top']
+    if current_line:
+        lines.append(current_line)
 
-    if current_word:
-        words_in_page.append(current_word)
+    lines_text = []
+    for line_chars in lines:
+        line_text = "".join(c['text'] for c in sorted(line_chars, key=lambda c: c['x0']))
+        lines_text.append(line_text.strip())
+    return lines_text
 
-    # Parcourir les mots pour trouver le plus long et les positions des "$"
-    for word_chars in words_in_page:
-        word_text = "".join([c["text"] for c in word_chars]).strip()
-        word_x_end = max(c["x1"] for c in word_chars)
-
-        if not any(c.isdigit() for c in word_text):  # Ignore les mots avec des chiffres (montants)
-            if word_x_end > max_x_first_col and len(word_text) > len(longest_poste["text"]):
-                max_x_first_col = word_x_end
-                longest_poste = {"text": word_text, "x_end": word_x_end}
-
-        if "$" in word_text:
-            for char in word_chars:
-                if char["text"] == "$":
-                    dollar_positions.append(char["x0"])
-
-    # Détermine les positions X des colonnes
-    first_col_end = max_x_first_col if max_x_first_col > 0 else 200  # Valeur par défaut
-    second_col_end = min(dollar_positions) if dollar_positions else first_col_end + 100
-
-    return {
-        "first_col_end": first_col_end,
-        "second_col_end": second_col_end
-    }
-
-def parse_financial_page(page):
-    """Parse une page financière en utilisant les positions X."""
-    # Obtenir les positions des colonnes pour cette page
-    column_info = find_column_positions(page)
-    first_col_end = column_info["first_col_end"]
-    second_col_end = column_info["second_col_end"]
-
-    # Définir les colonnes explicitement
-    table_settings = {
-        "vertical_strategy": "explicit",
-        "horizontal_strategy": "text",
-        "explicit_vertical_lines": [0, first_col_end, second_col_end, page.width]
-    }
-
-    # Extraire le tableau avec les colonnes définies
-    try:
-        table = page.extract_table(table_settings)
-        return table
-    except Exception as e:
-        print(f"Failed to extract table: {e}")
-        return None
+def merge_columns(postes, col2, col3):
+    result = []
+    max_lines = max(len(postes), len(col2), len(col3))
+    for i in range(max_lines):
+        poste = postes[i] if i < len(postes) else ""
+        c2 = col2[i] if i < len(col2) else ""
+        c3 = col3[i] if i < len(col3) else ""
+        
+        def clean_montant(m):
+            m_clean = m.replace(" ", "")
+            return int(m_clean) if m_clean.isdigit() else None
+        
+        annee_courante = clean_montant(c2)
+        annee_precedente = clean_montant(c3)
+        
+        if poste:
+            result.append({
+                "poste": poste,
+                "annee_courante": annee_courante,
+                "annee_precedente": annee_precedente
+            })
+    return result
 
 def process_pdf(file):
-    """Traite le PDF en utilisant les coordonnées X pour les colonnes."""
+    """Traite le PDF envoyé en fichier (stream) en utilisant pdfplumber et la découpe par position des colonnes."""
+    results = []
     with pdfplumber.open(file) as pdf:
-        full_text = ""
-        comptes = []
-        entreprise_id = generer_id_unique()
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text or len(text) < 40:
+                page_image = page.to_image(resolution=300).original
+                text = ocr_image(page_image)
+            poste_fin_x, col2_fin_x = detect_column_positions(page)
+            bbox_poste = (0, 0, poste_fin_x, page.height)
+            bbox_col2 = (poste_fin_x + 1, 0, col2_fin_x, page.height)
+            bbox_col3 = (col2_fin_x + 1, 0, page.width, page.height)
 
-        # 1. Première page : métadonnées
-        first_page = pdf.pages[0]
-        first_page_text = first_page.extract_text() or ocr_image(first_page.to_image().original)
-        doc = nlp(first_page_text)
-        company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
+            postes = extract_text_by_bbox(page, bbox_poste)
+            col2 = extract_text_by_bbox(page, bbox_col2)
+            col3 = extract_text_by_bbox(page, bbox_col3)
 
-        ef_info = detecter_type_etats_financiers(first_page_text)
-        annee_etats = detecter_annee_etats(first_page_text)
-        date_complete = detecter_date_complete(first_page_text)
+            page_results = merge_columns(postes, col2, col3)
+            results.extend(page_results)
 
-        # 2. Traite chaque page
-        for page_num, page in enumerate(pdf.pages):
-            page_text = page.extract_text() or ocr_image(page.to_image().original)
-            full_text += page_text + "\n"
-
-            # Analyser la page financière
-            table = parse_financial_page(page)
-            if table:
-                for row in table:
-                    if len(row) >= 3:  # Assurez-vous que la ligne a au moins 3 colonnes
-                        poste, montant1, montant2 = row[0], row[1], row[2]
-                        poste = poste.strip()
-                        montant1 = montant1.strip()
-                        montant2 = montant2.strip()
-
-                        # Nettoyer les montants
-                        montant1_clean = None
-                        montant2_clean = None
-                        if montant1:
-                            montant1_clean = float(re.sub(r'[^\d.,]', '', montant1).replace(',', '.')) if re.sub(r'[^\d.,]', '', montant1) else None
-                        if montant2:
-                            montant2_clean = float(re.sub(r'[^\d.,]', '', montant2).replace(',', '.')) if re.sub(r'[^\d.,]', '', montant2) else None
-
-                        if poste and (montant1_clean is not None or montant2_clean is not None):
-                            comptes.append({
-                                "id": f"CPT_{uuid.uuid4().hex[:8].upper()}",
-                                "nom": poste,
-                                "etat": "etat_des_resultats",
-                                "section": None,
-                                "montant_annee_courante": montant1_clean,
-                                "montant_annee_precedente": montant2_clean,
-                                "reference_annexe": None,
-                                "page_source": page_num + 1
-                            })
-
-        return {
-            "metadata": {
-                "entreprise_id": entreprise_id,
-                "nom_entreprise_anonymise": company_name,
-                "annee_etats_financiers": annee_etats,
-                "date_etats_financiers": date_complete,
-                "type_etats_financiers": ef_info["type"],
-                "est_consolide": ef_info["consolide"],
-                "date_extraction": datetime.now().strftime("%Y-%m-%d"),
-                "source": file.filename,
-                "Poste long":longest_poste["text"]
-            },
-            "comptes": comptes,
-            "annexes": [],
-            "texte_complet_anonymise": anonymize_text(full_text, company_name)
-        }
-
+    return results
