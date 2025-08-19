@@ -36,103 +36,127 @@ def clean_montant(text):
     except:
         return None
 
-def detect_financial_page(lines):
-    """Détecte si une page est une page financière (contient des montants)."""
-    for line in lines[:10]:  # Vérifie les 10 premières lignes
-        if re.search(r'\d[\d\s.,]+\s*\$\s*\d[\d\s.,]+', line):
-            return True
-    return False
+def find_column_positions(page):
+    """Trouve les positions X des colonnes en analysant les 5 premières lignes."""
+    words = page.chars  # Tous les caractères avec leurs positions X/Y
 
-def parse_financial_page(page_text):
-    """Parse une page financière en sections, postes et totaux."""
-    lines = page_text.split('\n')
+    # Trouve la position X maximale des mots de la 1ère colonne (sans chiffres)
+    max_x_first_col = 0
+    longest_poste = {"text": "", "x_end": 0}
+
+    # Trouve les positions X des "$" pour les colonnes de montants
+    dollar_positions = []
+
+    for char in words:
+        if char["text"].isdigit() or char["text"] == "$":
+            if char["text"] == "$":
+                dollar_positions.append(char["x0"])
+        else:
+            # Trouve le mot le plus long (sans chiffres)
+            if not any(c.isdigit() for c in char["text"]):
+                word_length = len(char["text"].strip())
+                word_x_end = char["x1"]
+                if word_x_end > max_x_first_col and word_length > len(longest_poste["text"]):
+                    max_x_first_col = word_x_end
+                    longest_poste = {"text": char["text"].strip(), "x_end": word_x_end}
+
+    # Détermine les positions X des colonnes
+    first_col_end = max_x_first_col if max_x_first_col > 0 else 200  # Valeur par défaut
+    second_col_end = min(dollar_positions) if dollar_positions else first_col_end + 100
+
+    return {
+        "longest_poste": longest_poste,
+        "first_col_end": first_col_end,
+        "dollar_positions": dollar_positions,
+        "second_col_end": second_col_end
+    }
+
+def extract_words_in_range(page, x_start, x_end):
+    """Extrait le texte dans une plage de positions X."""
+    words = page.chars
+    text_parts = []
+
+    for char in words:
+        if x_start <= char["x0"] <= x_end:
+            text_parts.append(char["text"])
+
+    return "".join(text_parts).strip()
+
+def parse_financial_page(page):
+    """Parse une page financière en utilisant les positions X."""
+    column_info = find_column_positions(page)
     data = {
         "sections": [],
         "postes": [],
         "totaux": [],
         "debug_info": {
-            "longest_term": {"term": "", "position": 0},
-            "first_montant_line": None
+            "longest_poste": column_info["longest_poste"],
+            "first_col_end": column_info["first_col_end"],
+            "dollar_positions": column_info["dollar_positions"],
+            "second_col_end": column_info["second_col_end"]
         }
     }
 
     current_section = None
-    in_section = False
+    words = page.chars
+    lines = {}
 
-    for line_num, line in enumerate(lines):
-        line = line.strip()
-        if not line:
+    # Regroupe les caractères en lignes (par position Y)
+    for char in words:
+        y = round(char["top"], 1)
+        if y not in lines:
+            lines[y] = []
+        lines[y].append(char)
+
+    # Traite chaque ligne
+    for y, chars_in_line in sorted(lines.items()):
+        line_text = "".join([c["text"] for c in chars_in_line]).strip()
+        if not line_text:
             continue
-
-        # Détection du type d'état (première ligne avec des mots clés)
-        if line_num == 0:
-            if "ÉTAT DES RÉSULTATS" in line.upper():
-                data["type_etat"] = "etat_des_resultats"
-            elif "BILAN" in line.upper():
-                data["type_etat"] = "bilan"
-            else:
-                data["type_etat"] = "inconnu"
 
         # Détection des sections (lignes sans montants)
-        if not re.search(r'\d', line):
-            if any(section in line.upper() for section in ["PRODUITS", "CHARGES", "ACTIF", "PASSIF", "BÉNÉFICE"]):
-                current_section = line
-                in_section = True
+        if not re.search(r'\d', line_text):
+            if any(section in line_text.upper() for section in ["PRODUITS", "CHARGES", "ACTIF", "PASSIF", "BÉNÉFICE"]):
+                current_section = line_text
                 data["sections"].append({
                     "nom": current_section,
-                    "ligne": line_num
+                    "y_position": y
                 })
             continue
 
-        # Détection de la première ligne avec montants (pour debug)
-        if data["debug_info"]["first_montant_line"] is None and re.search(r'\d[\d\s.,]+\s*\$\s*\d[\d\s.,]+', line):
-            data["debug_info"]["first_montant_line"] = {
-                "ligne": line,
-                "position": line_num
-            }
+        # Extrait les données en utilisant les positions X
+        poste = extract_words_in_range(page, 0, column_info["first_col_end"])
+        montant1 = extract_words_in_range(page, column_info["first_col_end"], column_info["second_col_end"])
+        montant2 = extract_words_in_range(page, column_info["second_col_end"], page.width)
 
-        # Trouve le plus long terme (pour debug)
-        words = re.findall(r'[^\d\s]+', line)
-        for word in words:
-            if len(word) > len(data["debug_info"]["longest_term"]["term"]):
-                data["debug_info"]["longest_term"] = {
-                    "term": word,
-                    "position": line.find(word)
-                }
+        montant1_clean = clean_montant(montant1)
+        montant2_clean = clean_montant(montant2)
 
-        # Détection des postes (lignes avec 2 montants)
-        if re.search(r'\d[\d\s.,]+\s*\$\s*\d[\d\s.,]+', line):
-            parts = re.split(r'\s{2,}', line)
-            if len(parts) >= 3:
-                poste = parts[0].strip()
-                montant1 = clean_montant(parts[1])
-                montant2 = clean_montant(parts[2])
+        if poste and (montant1_clean is not None or montant2_clean is not None):
+            is_total = poste.upper().startswith(("BÉNÉFICE", "TOTAL", "SOMME"))
 
-                # Vérifie si c'est un total (commence par "Bénéfice", "Total", etc.)
-                is_total = poste.upper().startswith(("BÉNÉFICE", "TOTAL", "SOMME"))
+            data["postes"].append({
+                "poste": poste,
+                "montant1": montant1_clean,
+                "montant2": montant2_clean,
+                "est_total": is_total,
+                "section": current_section,
+                "y_position": y
+            })
 
-                data["postes"].append({
-                    "ligne": line_num,
+            if is_total:
+                data["totaux"].append({
                     "poste": poste,
-                    "montant1": montant1,
-                    "montant2": montant2,
-                    "est_total": is_total,
-                    "section": current_section
+                    "montant1": montant1_clean,
+                    "montant2": montant2_clean,
+                    "section": current_section,
+                    "y_position": y
                 })
-
-                if is_total:
-                    data["totaux"].append({
-                        "ligne": line_num,
-                        "poste": poste,
-                        "montant1": montant1,
-                        "montant2": montant2,
-                        "section": current_section
-                    })
 
     return data
 
 def process_pdf(file):
-    """Traite le PDF en détectant les pages financières et en les parsant."""
+    """Traite le PDF en utilisant les coordonnées X pour les colonnes."""
     with pdfplumber.open(file) as pdf:
         full_text = ""
         result = {
@@ -147,19 +171,15 @@ def process_pdf(file):
             page_text = page.extract_text() or ocr_image(page.to_image().original)
             full_text += page_text + "\n"
 
-            if detect_financial_page(page_text.split('\n')):
-                parsed_page = parse_financial_page(page_text)
-                parsed_page["page_num"] = page_num + 1
-                result["pages"].append(parsed_page)
+            parsed_page = parse_financial_page(page)
+            parsed_page["page_num"] = page_num + 1
+            result["pages"].append(parsed_page)
 
-                # Met à jour les infos de debug globales
-                if "debug_info" in parsed_page:
-                    result["debug_info"].update({
-                        "longest_term": parsed_page["debug_info"]["longest_term"],
-                        "first_montant_line": parsed_page["debug_info"]["first_montant_line"]
-                    })
+            # Met à jour les infos de debug globales
+            if "debug_info" in parsed_page:
+                result["debug_info"].update(parsed_page["debug_info"])
 
-        # 1. Première page : métadonnées
+        # Métadonnées
         first_page_text = pdf.pages[0].extract_text() or ocr_image(pdf.pages[0].to_image().original)
         doc = nlp(first_page_text)
         company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
