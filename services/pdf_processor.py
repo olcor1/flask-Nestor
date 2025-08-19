@@ -80,24 +80,24 @@ def merge_columns(postes, col2, col3):
     return result
 
 def process_pdf(file):
-    """Traite le PDF envoyé en fichier (stream) en utilisant pdfplumber et la découpe par position des colonnes."""
+    """Processus ligne par ligne, extraction poste et montants avec regex robuste."""
     results = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            text = page.extract_text()
-            if not text or len(text) < 40:
-                page_image = page.to_image(resolution=300).original
-                text = ocr_image(page_image)
-            poste_fin_x, col2_fin_x = detect_column_positions(page)
-            bbox_poste = (0, 0, poste_fin_x, page.height)
-            bbox_col2 = (poste_fin_x + 1, 0, col2_fin_x, page.height)
-            bbox_col3 = (col2_fin_x + 1, 0, page.width, page.height)
-
-            postes = extract_text_by_bbox(page, bbox_poste)
-            col2 = extract_text_by_bbox(page, bbox_col2)
-            col3 = extract_text_by_bbox(page, bbox_col3)
-
-            page_results = merge_columns(postes, col2, col3)
-            results.extend(page_results)
-
+            lines = page.extract_text().split('\n')
+            for ligne in lines:
+                # Regex qui tolère tous symboles et montants à droite
+                match = re.match(
+                    r'^([A-Za-zÀ-ÿ\s\(\)\-\.]+?)\s+(\d{1,3}(?:\s\d{3})*)(?:\s*\$\s*|\s+)(\d{1,3}(?:\s\d{3})*)?\s*\$?', 
+                    ligne)
+                if match:
+                    poste = match.group(1).strip()
+                    montant1 = int(match.group(2).replace(" ", "")) if match.group(2) else None
+                    montant2 = int(match.group(3).replace(" ", "")) if match.group(3) else None
+                    results.append({
+                        "poste": poste,
+                        "annee_courante": montant1,
+                        "annee_precedente": montant2
+                    })
     return results
+
