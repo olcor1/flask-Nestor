@@ -7,8 +7,14 @@ import spacy
 import re
 import logging
 import os
-import json
+from flask import Flask, request, jsonify
 from werkzeug.datastructures import FileStorage
+from .anonymizer import anonymize_text
+from .financial_utils import (
+    detecter_date_complete,
+    detecter_annee_etats,
+    detecter_type_etats_financiers
+)
 
 # Configure logging to capture logs in a list
 logs = []
@@ -234,4 +240,22 @@ def process_pdf(file_path):
                 doc = nlp(first_page_text)
                 company_name = next((ent.text for ent in doc.ents if ent.label_ == "ORG"), "[ENTREPRISE]")
 
-                ef_info = detect
+                ef_info = detecter_type_etats_financiers(first_page_text)
+                annee_etats = detecter_annee_etats(first_page_text)
+                date_complete = detecter_date_complete(first_page_text)
+
+                result["metadata"] = {
+                    "entreprise_id": entreprise_id,
+                    "nom_entreprise_anonymise": company_name,
+                    "annee_etats_financiers": annee_etats,
+                    "date_etats_financiers": date_complete,
+                    "type_etats_financiers": ef_info["type"],
+                    "est_consolide": ef_info["consolide"],
+                    "date_extraction": datetime.now().strftime("%Y-%m-%d"),
+                    "source": file_path
+                }
+
+            result["logs"] = logs
+            return result
+    except Exception as e:
+        logger.error
