@@ -35,6 +35,40 @@ def clean_montant(text):
         return float(text.replace(',', '.')) if text else None
     except:
         return None
+def find_column_positions(page):
+    """Trouve les positions X des colonnes en analysant les 5 premières lignes."""
+    words = page.chars  # Tous les caractères avec leurs positions X/Y
+
+    # Trouve la position X maximale des mots de la 1ère colonne (sans chiffres)
+    max_x_first_col = 0
+    longest_poste = {"text": "", "x_end": 0}
+
+    # Trouve les positions X des "$" pour les colonnes de montants
+    dollar_positions = []
+
+    for char in words:
+        if char["text"].isdigit() or char["text"] == "$":
+            if char["text"] == "$":
+                dollar_positions.append(char["x0"])
+        else:
+            # Trouve le mot le plus long (sans chiffres)
+            if not any(c.isdigit() for c in char["text"]):
+                word_length = len(char["text"].strip())
+                word_x_end = char["x1"]
+                if word_x_end > max_x_first_col and word_length > len(longest_poste["text"]):
+                    max_x_first_col = word_x_end
+                    longest_poste = {"text": char["text"].strip(), "x_end": word_x_end}
+
+    # Détermine les positions X des colonnes
+    first_col_end = max_x_first_col if max_x_first_col > 0 else 200  # Valeur par défaut
+    second_col_end = min(dollar_positions) if dollar_positions else first_col_end + 100
+
+    return {
+        "longest_poste": longest_poste,
+        "first_col_end": first_col_end,
+        "dollar_positions": dollar_positions,
+        "second_col_end": second_col_end
+    }
 
 def extract_words_in_range(page, x_start, x_end):
     """Extrait le texte dans une plage de positions X."""
