@@ -162,7 +162,8 @@ def process_pdf(file):
                 "type_etats_financiers": ef_info["type"],
                 "est_consolide": ef_info["consolide"],
                 "date_extraction": datetime.now().strftime("%Y-%m-%d"),
-                "source": file.filename
+                "source": file.filename,
+                "Poste long":longest_poste
             },
             "comptes": comptes,
             "annexes": [],
