@@ -168,3 +168,4 @@ def process_pdf(file):
             "annexes": [],
             "texte_complet_anonymise": anonymize_text(full_text, company_name)
         }
+
