@@ -163,7 +163,7 @@ def process_pdf(file):
                 "est_consolide": ef_info["consolide"],
                 "date_extraction": datetime.now().strftime("%Y-%m-%d"),
                 "source": file.filename,
-                "Poste long":longest_poste
+                "Poste long":longest_poste["text"]
             },
             "comptes": comptes,
             "annexes": [],
