@@ -1,76 +1,40 @@
-import pdfplumber
-import pytesseract
-from PIL import Image
-import spacy
-import re
-import json
+def detect_col_positions(pdf_page):
+    lines = pdf_page.extract_text().split("\n")
+    line_chars = []
+    for line in lines:
+        # Trouve les caractères de la ligne avec page.chars
+        chars_in_line = [c for c in pdf_page.chars if abs(c['top'] - get_line_top(line, pdf_page.chars)) < 2]
+        line_chars.append((line, chars_in_line))
 
-nlp = spacy.load("fr_core_news_md")
+    # Étape 1 : Trouve le poste le plus long
+    poste_max = max(line_chars, key=lambda t: len(t[0].split()))
+    poste_chars = [c for c in poste_max[1] if not c['text'].isdigit()]
+    poste_fin_x = max([c['x1'] for c in poste_chars]) if poste_chars else None
 
-def ocr_image(image):
-    """Effectue l'OCR sur une image avec gestion des erreurs."""
-    try:
-        return pytesseract.image_to_string(image, lang='fra+eng')
-    except Exception:
-        return ""
+    # Étape 4-5 : Pour quelques lignes avec montants, note le x1 du dernier chiffre de la première colonne montant
+    positions_montant_1 = []
+    for (ligne, chars) in line_chars[:5]:  # Prends les 5 premières lignes qui ressemblent à un poste+montant
+        montant_chars = [c for c in chars if c['x0'] > poste_fin_x - 2 and c['text'].isdigit()]
+        if montant_chars:
+            montant1_fin_x = max([c['x1'] for c in montant_chars])
+            positions_montant_1.append(montant1_fin_x)
 
-def parse_ligne(ligne):
-    """
-    Parse une ligne de texte pour extraire le poste, le montant année courante et le montant année précédente.
+    # Filtrer pour prendre la position la plus fréquente ou la moyenne des deux plus similaires
+    if positions_montant_1:
+        # Par exemple, prendre la médiane ou la première qui revient 2 fois
+        from statistics import median
+        montant1_fin_x = int(median(positions_montant_1))
+    else:
+        montant1_fin_x = poste_fin_x + 100  # fallback
 
-    Gère les montants vides représentés par "-", les montants négatifs entre parenthèses "(…)",
-    et les montants avec séparateur de milliers espace.
-    """
-    match = re.match(
-        r'''^
-        ([A-Za-zÀ-ÿ\s\(\)\-\.'’]+?)             # poste : tout texte + espaces jusqu'au premier nombre (tolérance caractères spéciaux)
-        \s+([-]|\(?\d{1,3}(?:\s\d{3})*\)?)\s*\$?   # montant 1 : nombre ou - ou (négatif) (+ $ facultatif)
-        (?:\s+([-]|\(?\d{1,3}(?:\s\d{3})*\)?)\s*\$?)?   # montant 2 : nombre ou - ou (négatif) (+ $ facultatif, optionnel)
-        $''', ligne, re.VERBOSE | re.UNICODE)
-    if match:
-        poste = match.group(1).strip()
-        montant1 = match.group(2)
-        montant2 = match.group(3) if match.group(3) else None
+    # positions = [poste_fin_x, montant1_fin_x] serviront à `extract_table`
+    return [poste_fin_x, montant1_fin_x]
 
-        def montant_to_int(m):
-            if m is None:
-                return None
-            m = m.replace(" ", "")
-            if m == "-":
-                return 0
-            if m.startswith("(") and m.endswith(")"):
-                try:
-                    return -int(m[1:-1])
-                except ValueError:
-                    return None
-            try:
-                return int(m)
-            except ValueError:
-                return None
-
-        return {
-            "poste": poste,
-            "annee_courante": montant_to_int(montant1),
-            "annee_precedente": montant_to_int(montant2)
-        }
-    return None
-
-def process_pdf(file):
-    """
-    Traite un PDF donné en fichier ouvert (stream) et extrait les données financières ligne par ligne,
-    renvoie une liste de dictionnaires avec poste et deux années.
-    """
-    results = []
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text or len(text) < 40:
-                # Fallback OCR si texte insuffisant
-                page_image = page.to_image(resolution=300).original
-                text = ocr_image(page_image)
-            lines = text.split('\n')
-            for ligne in lines:
-                parsed = parse_ligne(ligne)
-                if parsed and parsed['poste']:
-                    results.append(parsed)
-    return results
+# Exemple d'appel :
+with pdfplumber.open(file) as pdf:
+    for page in pdf.pages:
+        vertical_positions = detect_col_positions(page)
+        table = page.extract_table(table_settings={
+            "vertical_strategy": "explicit",
+            "explicit_vertical_lines": vertical_positions
+        })
