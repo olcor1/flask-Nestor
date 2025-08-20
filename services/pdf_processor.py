@@ -1,4 +1,5 @@
 import fitz  # PyMuPDF
+import re
 
 def parse_montant(m):
     """Convertit une chaîne montant en int, gérant '-', parenthèses négatives, espaces"""
@@ -17,36 +18,52 @@ def parse_montant(m):
     except:
         return None
 
-def process_pdf_with_find_tables(filepath):
-    doc = fitz.open(filepath)
+def process_pdf(file):
+    """
+    Ouvre un fichier pdf (chemin ou objet compatible fitz.open), extrait les lignes de tableau.
+    """
     results = []
+    doc = fitz.open(file)
     for page in doc:
         tables = page.find_tables()
         if not tables:
+            # Fallback basique sur extraction texte ligne par ligne si pas de table détectée
+            text = page.get_text("text")
+            lines = text.split("\n")
+            for ligne in lines:
+                if not ligne.strip():
+                    continue
+                # Regex simple pour séparer poste et montants concaténés
+                match = re.match(r'^([^\d]+)(.*)$', ligne.strip())
+                if match:
+                    poste = match.group(1).strip()
+                    montants = match.group(2).strip()
+                    results.append({
+                        "poste": poste,
+                        "montants": montants,
+                        "annee_courante": None,
+                        "annee_precedente": None
+                    })
             continue
-        for tbl in tables:
-            # tbl is a list of rectangles representing cells, convert to text grid
-            rows = []
-            # Récupère les rectangles et fusionne par lignes avec tolérance
-            blocks = page.get_text("blocks")
-            # Utilise PyMuPDF helper pour extraire table textuelle
-            for rect in tbl:
-                # Chaque rect est un cell bbox : on extrait texte dans bbox
-                cell_texts = []
-                for r in rect:
-                    cell_bbox = r
-                    text = page.get_textbox(cell_bbox).strip()
-                    cell_texts.append(text)
-                rows.append(cell_texts)
 
-            # Alternativement, utiliser page.extract_table avec bbox ciblé sur tbl
-            # Mais pour simplicité, on parcourt les rows construits
-            for row in rows:
+        # Pour chaque table détectée
+        for tbl in tables:
+            # tbl est une liste de rectangles (chaque rectangle = cellules de la table sur la page)
+            # Extraction de texte par cellule via bbox
+            rows_text = []
+            for row in tbl:
+                row_cells = []
+                for cell_rect in row:
+                    text = page.get_textbox(cell_rect).strip()
+                    row_cells.append(text)
+                rows_text.append(row_cells)
+
+            for row in rows_text:
                 if len(row) < 3:
                     continue
                 poste = row[0]
                 montant1 = parse_montant(row[1])
-                montant2 = parse_montant(row[2])
+                montant2 = parse_montant(row)
                 if poste:
                     results.append({
                         "poste": poste,
@@ -54,8 +71,3 @@ def process_pdf_with_find_tables(filepath):
                         "annee_precedente": montant2
                     })
     return results
-
-# Exemple d'utilisation:
-# file_path = "ton_etat_financier.pdf"
-# data = process_pdf_with_find_tables(file_path)
-# print(data)
