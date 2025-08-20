@@ -11,25 +11,25 @@ def ocr_image(image):
         return ""
 
 def detect_col_positions(page, n_lignes=6, tol=2):
-    lines = page.extract_text()
-    if not lines:
+    text = page.extract_text()
+    if not text:
         return None, None
-    lines = lines.split("\n")
+    lines = text.split("\n")
     line_chars = []
     for line in lines:
+        # approximation du top de la ligne
         tops = [c['top'] for c in page.chars if c['text'] and line.startswith(c['text'])]
         top = tops[0] if tops else None
         if top is not None:
             chars_in_line = [c for c in page.chars if abs(c['top'] - top) < tol]
             line_chars.append((line, chars_in_line))
-    poste_max = max(line_chars, key=lambda t: len(re.sub(r'[\d\-\s$]+', '', t[0])), default=None)
-    nom_poste_plus_long = poste_max[0].strip() if poste_max else ""
+    poste_max = max(line_chars, key=lambda t: len(re.sub(r'[\d\-\s$]+', '', t)), default=None)
+    nom_poste_plus_long = poste_max.strip() if poste_max else ""
     if poste_max:
         poste_chars = [c for c in poste_max[1] if not c['text'].isdigit()]
         poste_fin_x = max([c['x1'] for c in poste_chars]) if poste_chars else 0
     else:
         poste_fin_x = 0
-
     montant1_fins = []
     for (ligne, chars) in line_chars[:n_lignes]:
         montant_chars = [c for c in chars if c['x0'] > poste_fin_x - 2 and (c['text'].isdigit() or c['text'] in "-()")]
@@ -47,7 +47,6 @@ def detect_col_positions(page, n_lignes=6, tol=2):
             montant1_fin_x = max([c['x1'] for c in montant1_part])
             montant1_fins.append(montant1_fin_x)
     montant1_fin_x = int(median(montant1_fins)) if montant1_fins else poste_fin_x + 85
-
     return nom_poste_plus_long, [int(poste_fin_x), montant1_fin_x]
 
 def process_pdf(file):
@@ -60,20 +59,21 @@ def process_pdf(file):
                 text = ocr_image(page_image)
                 if not text or len(text.strip()) < 40:
                     continue
-
             nom_poste_plus_long, positions = detect_col_positions(page)
-            debog_table_extract = False
+            # Debug print
+            print(f"Nom poste plus long: {nom_poste_plus_long} / Positions colonnes: {positions}")
 
+            debog_table_extract = False
             if positions and positions[0] is not None and positions[1] is not None:
                 table = page.extract_table(table_settings={
                     "vertical_strategy": "explicit",
                     "explicit_vertical_lines": positions
                 })
-                if table:
+                if table and len(table) > 0:
                     debog_table_extract = True
                     for row in table:
-                        if row and len(row) >= 2 and row[0]:
-                            poste = row[0].strip()
+                        if row and len(row) >= 2 and row:
+                            poste = row.strip()
                             montants = " ".join(filter(None, [cell.strip() if cell else "" for cell in row[1:]]))
                             results.append({
                                 "poste": poste,
@@ -82,21 +82,20 @@ def process_pdf(file):
                                 "table_extract_roule": True
                             })
 
+            # Fallback plus large (toutes lignes non vides)
             if not debog_table_extract:
-                # fallback : extraction ligne par ligne RAW + montants concaténés
-                lignes = text.split("\n")
-                for ligne in lignes:
-                    if ligne.strip():
-                        # Pas de parsing, simple extraction poste + chiffres concaténés
-                        m = re.match(r'^([^\d]+)([\d\s\-\(\)\$]+)$', ligne.strip())
-                        if m:
-                            poste = m.group(1).strip()
-                            montants = m.group(2).strip()
-                            results.append({
-                                "poste": poste,
-                                "montants": montants,
-                                "nom_poste_plus_long": nom_poste_plus_long,
-                                "table_extract_roule": False
-                            })
-
+                for ligne in text.split("\n"):
+                    if not ligne.strip():
+                        continue
+                    # Extraire poste + tout ce qui suit (montants non séparés)
+                    match = re.match(r'^([^\d]+)(.*)$', ligne.strip())
+                    if match:
+                        poste = match.group(1).strip()
+                        montants = match.group(2).strip()
+                        results.append({
+                            "poste": poste,
+                            "montants": montants,
+                            "nom_poste_plus_long": nom_poste_plus_long,
+                            "table_extract_roule": False
+                        })
     return results
