@@ -14,72 +14,24 @@ def ocr_image(image):
     except Exception:
         return ""
 
-def get_line_top(target_line, chars):
+def parse_ligne_regex(ligne):
     """
-    Retourne la coordonnée 'top' la plus probable pour une ligne donnée d'après les caractères de pdfplumber.
+    Fallback : parse une ligne avec regex comme avant, mais amélioré.
     """
-    for c in chars:
-        # Recherche le premier caractère qui appartient à la ligne
-        if c['text'] and c['text'][0] in target_line:
-            return c['top']
-    return None
+    # Regex pour capturer : poste + 1 ou 2 montants (avec gestion "-" et parenthèses)
+    match = re.match(
+        r'^([A-Za-zÀ-ÿ\s\(\)\-\.'']+?)\s+([-]|\(?\d{1,3}(?:\s\d{3})*\)?)\s*\$?\s*(?:\s+([-]|\(?\d{1,3}(?:\s\d{3})*\)?)\s*\$?)?\s*$',
+        ligne
+    )
+    if match:
+        poste = match.group(1).strip()
+        montant1 = match.group(2)
+        montant2 = match.group(3) if match.group(3) else None
 
-def detect_col_positions(page, n_lignes=6, tol=2):
-    """
-    Détecte les positions verticales (x) pour découper le tableau :
-    - Fin du poste le plus long (Position A)
-    - Fin du montant 1 le plus 'concordant' (Position B)
-    """
-    lines = page.extract_text().split("\n")
-    line_chars = []
-    for line in lines:
-        top = get_line_top(line, page.chars)
-        if top is not None:
-            chars_in_line = [c for c in page.chars if abs(c['top'] - top) < tol]
-            line_chars.append((line, chars_in_line))
-    # Poste le plus long
-    poste_max = max(line_chars, key=lambda t: len(re.sub(r'[\d\-\s$]+', '', t[0])), default=None)
-    if poste_max:
-        poste_chars = [c for c in poste_max[1] if not c['text'].isdigit()]
-        poste_fin_x = max([c['x1'] for c in poste_chars]) if poste_chars else 0
-    else:
-        poste_fin_x = 0
-
-    # Fin du montant 1 sur les premières lignes détectées
-    montant1_fins = []
-    for (ligne, chars) in line_chars[:n_lignes]:
-        montant_chars = [c for c in chars if c['x0'] > poste_fin_x - 2 and (c['text'].isdigit() or c['text'] in "-()")]
-        if not montant_chars:
-            continue
-        montant1_part = []
-        prev_is_digit = False
-        for c in montant_chars:
-            if c['text'].isdigit() or c['text'] in "()-":
-                montant1_part.append(c)
-                prev_is_digit = True
-            elif prev_is_digit:
-                break
-        if montant1_part:
-            montant1_fin_x = max([c['x1'] for c in montant1_part])
-            montant1_fins.append(montant1_fin_x)
-    montant1_fin_x = int(median(montant1_fins)) if montant1_fins else poste_fin_x + 85
-
-    return [int(poste_fin_x), montant1_fin_x]
-
-def parse_extracted_table(extracted_table):
-    """
-    Prend une table extraite par pdfplumber et la formate proprement.
-    """
-    results = []
-    for row in extracted_table:
-        if not row or len(row) < 2:
-            continue
-        poste = row[0].strip() if row[0] else ""
-        montant1 = row[1].replace(" ", "").replace('\xa0','') if len(row) > 1 and row[1] else None
-        montant2 = row[2].replace(" ", "").replace('\xa0','') if len(row) > 2 and row[2] else None
         def montant_to_int(m):
             if not m or m == "":
                 return None
+            m = m.replace(" ", "")
             if m in ["-", "–"]:
                 return 0
             if m.startswith("(") and m.endswith(")"):
@@ -91,17 +43,59 @@ def parse_extracted_table(extracted_table):
                 return int(m)
             except Exception:
                 return None
-        results.append({
+
+        return {
             "poste": poste,
             "annee_courante": montant_to_int(montant1),
             "annee_precedente": montant_to_int(montant2)
-        })
-    return results
+        }
+    return None
+
+def detect_col_positions(page):
+    """Version simplifiée de détection des positions."""
+    try:
+        chars = page.chars
+        if not chars:
+            return None
+            
+        # Trouve la position x max des caractères non-numériques (fin des postes)
+        non_digit_chars = [c for c in chars if not c['text'].isdigit() and c['text'] not in '$-()']
+        if non_digit_chars:
+            poste_fin_x = max([c['x1'] for c in non_digit_chars])
+        else:
+            return None
+            
+        # Trouve la position x max des premiers montants
+        digit_chars = [c for c in chars if c['text'].isdigit() and c['x0'] > poste_fin_x]
+        if digit_chars:
+            # Groupe les chiffres par ligne approximative et prend le milieu
+            lines_digits = {}
+            for c in digit_chars:
+                line_key = round(c['top'] / 5) * 5  # Groupe par tranches de 5px
+                if line_key not in lines_digits:
+                    lines_digits[line_key] = []
+                lines_digits[line_key].append(c)
+            
+            montant1_fins = []
+            for line_digits in lines_digits.values():
+                if len(line_digits) > 2:  # Si plusieurs chiffres sur la ligne
+                    # Prend le milieu approximatif comme fin de colonne 1
+                    sorted_digits = sorted(line_digits, key=lambda c: c['x0'])
+                    mid_index = len(sorted_digits) // 2
+                    montant1_fin_x = sorted_digits[mid_index]['x1']
+                    montant1_fins.append(montant1_fin_x)
+            
+            if montant1_fins:
+                montant1_fin_x = int(median(montant1_fins))
+                return [int(poste_fin_x), montant1_fin_x]
+                
+        return None
+    except Exception:
+        return None
 
 def process_pdf(file):
     """
-    Extraction robuste avec positions dynamiques sur pdf natif.
-    Utilise une détection automatique des colonnes selon le poste le plus long et la fin du montant 1.
+    Version hybride : essaie d'abord l'extraction de table, puis fallback regex.
     """
     results = []
     with pdfplumber.open(file) as pdf:
@@ -110,12 +104,55 @@ def process_pdf(file):
             if not text or len(text.strip()) < 40:
                 page_image = page.to_image(resolution=300).original
                 text = ocr_image(page_image)
-                raise ValueError("Extraction OCR non implémentée dans ce script.")
-            verticals = detect_col_positions(page)
-            table = page.extract_table(table_settings={
-                "vertical_strategy": "explicit",
-                "explicit_vertical_lines": verticals
-            })
-            if table:
-                results += parse_extracted_table(table)
+                if not text or len(text.strip()) < 40:
+                    continue
+            
+            # Essaie d'abord la méthode de détection de positions
+            table_extracted = False
+            try:
+                positions = detect_col_positions(page)
+                if positions:
+                    table = page.extract_table(table_settings={
+                        "vertical_strategy": "explicit",
+                        "explicit_vertical_lines": positions
+                    })
+                    if table and len(table) > 0:
+                        for row in table:
+                            if row and len(row) >= 2 and row[0] and row.strip():
+                                poste = row.strip()
+                                montant1 = row[1].replace(" ", "").replace('\xa0','') if len(row) > 1 and row[1] else None
+                                montant2 = row[2].replace(" ", "").replace('\xa0','') if len(row) > 2 and row[2] else None
+                                
+                                def montant_to_int(m):
+                                    if not m or m == "":
+                                        return None
+                                    if m in ["-", "–"]:
+                                        return 0
+                                    if m.startswith("(") and m.endswith(")"):
+                                        try:
+                                            return -int(m[1:-1])
+                                        except Exception:
+                                            return None
+                                    try:
+                                        return int(m)
+                                    except Exception:
+                                        return None
+                                
+                                results.append({
+                                    "poste": poste,
+                                    "annee_courante": montant_to_int(montant1),
+                                    "annee_precedente": montant_to_int(montant2)
+                                })
+                        table_extracted = True
+            except Exception:
+                pass
+            
+            # Fallback : méthode regex ligne par ligne
+            if not table_extracted:
+                lines = text.split('\n')
+                for ligne in lines:
+                    parsed = parse_ligne_regex(ligne)
+                    if parsed and parsed['poste']:
+                        results.append(parsed)
+    
     return results
